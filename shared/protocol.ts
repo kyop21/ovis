@@ -556,7 +556,7 @@ export interface CommandForm {
 
 /** What the bridge knows about a command a user sent: accepted is never the same as done. */
 export interface CommandOutcome {
-  /** the outcome's own id, referenced by PendingMessage.outcome_id */
+  /** the outcome's own id */
   id: string;
   /** the pane the command was sent to */
   pane_id: string;
@@ -722,8 +722,6 @@ export interface PendingMessage {
   state: "queued" | "sending" | "held" | "uncertain";
   created_at: string;
   error?: { code: string; message: string };
-  /** the CommandOutcome this message's command is tracked by */
-  outcome_id?: string;
 }
 
 export type ClientMessage =
