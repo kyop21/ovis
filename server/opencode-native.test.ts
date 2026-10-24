@@ -45,6 +45,28 @@ describe("a skill OpenCode did not attach", () => {
 });
 
 describe("cold skill lookup budget", () => {
+  it.each(["absent", "present"])("records only known skills when the service times out and a remembered catalog is %s", async (availability) => {
+    const remembered = availability === "present";
+    const target = { ...pane, pane_id: `p_review_catalog_${remembered}`, cwd: root } as HerdrPane;
+    const text = "@effect @a.ts @alice,";
+    if (remembered) commands.rememberPaneCommands(target, "opencode", [{ name: "effect", description: "", source: "skill", trigger: "@" }]);
+    let clock = 1_000;
+    const now = spyOn(Date, "now").mockImplementation(() => clock);
+    const rpc = spyOn(herdr, "herdrRpc").mockResolvedValue({ process_info: { foreground_processes: [] } } as never);
+    const lookup = spyOn(service, "openCodeService").mockImplementation(async () => {
+      clock += CATALOG_SOURCE_BUDGET_MS;
+      return { version: "2.0.32", config: { baseUrl: failing.url.origin, port: failing.port!, pid: process.pid, password: "fixture" } };
+    });
+    const scan = spyOn(commands, "paneCommands");
+    try {
+      const result = await openCodeSkillsToType(target, undefined, text);
+      expect(result.skills).toEqual([]);
+      if (remembered) expect(result.sent?.unattached).toEqual(["effect"]);
+      else expect(result.sent).toBeUndefined();
+      expect(scan).not.toHaveBeenCalled();
+    } finally { now.mockRestore(); rpc.mockRestore(); lookup.mockRestore(); scan.mockRestore(); }
+  });
+
   it.each([0, CATALOG_SOURCE_BUDGET_MS])("never starts a synchronous scan after a service lookup taking %d ms", async (elapsed) => {
     let clock = 1_000;
     const now = spyOn(Date, "now").mockImplementation(() => clock);
@@ -60,7 +82,7 @@ describe("cold skill lookup budget", () => {
       expect(scan).not.toHaveBeenCalled();
       expect(result.skills).toEqual([]);
       if (elapsed === CATALOG_SOURCE_BUDGET_MS) {
-        expect(result.sent).toMatchObject({ unattached: ["effect"], form: { interaction: "terminal" } });
+        expect(result.sent).toBeUndefined();
         expect(clock).toBe(1_000 + CATALOG_SOURCE_BUDGET_MS);
         expect(session).not.toHaveBeenCalled();
       }

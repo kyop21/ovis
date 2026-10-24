@@ -319,20 +319,18 @@ export async function openCodeSkillsToType(pane: HerdrPane, sent: Sent, text: st
   const roots = typingRoots(await paneProcessRoots(pane.pane_id, label));
   if (resolveAgent(pane, roots).agent !== "opencode") return { sent, skills: [] };
   const tokensOf = (record: Sent): string[] => record?.agent === "opencode" ? skillTokens(text, record.invocations.map((invocation) => invocation.name)) : [];
-  const cold = cachedPaneCommands(pane) === undefined;
-  if (!cold && tokensOf(sent).length === 0) return { sent, skills: [] };
+  const cached = cachedPaneCommands(pane);
+  const cold = cached === undefined;
+  let record = sent ?? (cached?.agent === "opencode" ? commandSendFrom(pane, "opencode", cached.commands, text, screen) : undefined);
+  if (!cold && tokensOf(record).length === 0) return { sent: record, skills: [] };
   const cwd = pane.foreground_cwd ?? pane.cwd ?? null;
-  const { bound, rows, version } = await boundCatalog(pane, cold ? cwd : null, CATALOG_SOURCE_BUDGET_MS, stateDir);
-  let record = sent;
+  const { bound, rows } = await boundCatalog(pane, cold ? cwd : null, CATALOG_SOURCE_BUDGET_MS, stateDir);
   if (cold) {
     const native = rows?.filter((row) => row.source !== "builtin").map((row): SlashCommand => ({ ...row, forms: row.forms ?? [...UNKNOWN_FORMS], visibility: row.visibility ?? "offered", provenance: { transport: "native", verified: true } }));
-    // A synchronous scan cannot be interrupted by the lookup timer. Healthy services supply the
-    // catalog above; without one, only record v2's attempted mentions, never try to attach them.
-    const unconfirmed: SlashCommand[] = /^2\./u.test(version ?? "") ? [...text.matchAll(/(?:^|\s)@(\S+)/gu)].map((match) => ({
-      name: match[1]!, description: "", source: "skill", trigger: "@", forms: [...UNKNOWN_FORMS], provenance: { transport: "static", verified: false },
-    })) : [];
-    record = commandSendFrom(pane, "opencode", [...builtinCommands("opencode"), ...(native ?? unconfirmed)], text, screen);
-    if (!native) return { sent: record ? skillsNotAttached(record, tokensOf(record)) : record, skills: [] };
+    // A synchronous scan cannot be interrupted by the lookup timer. Without a native catalog,
+    // no mention is known to be a skill; files and other @words remain ordinary plain text.
+    record = commandSendFrom(pane, "opencode", [...builtinCommands("opencode"), ...(native ?? [])], text, screen);
+    if (!native) return { sent: record, skills: [] };
   }
   const tokens = tokensOf(record);
   if (tokens.length === 0) return { sent: record, skills: [] };

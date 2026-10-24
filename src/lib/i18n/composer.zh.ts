@@ -162,4 +162,6 @@ export const COMPOSER_ZH: Record<string, string> = {
   "Enter": "Enter",
   "Not inserted: this PC has not said yet what it supports. Insert it again.": "未插入：这台电脑尚未告知它支持的功能。请重新插入。",
   "Not inserted: the line holds a control character. Remove it, then insert again.": "未插入：输入框中有控制字符。删除后请重新插入。",
+  "Tab switched OpenCode's agent from {from} to {to}. Nothing more was typed. Check the terminal before sending again.": "Tab 键将 OpenCode 的 Agent 从 {from} 切换为 {to}。未继续输入。请先检查终端，再重新发送。",
+  "OpenCode attached another skill. Your chat text stayed here. Check the terminal before sending again.": "OpenCode 附加了另一个 Skill。聊天文本仍保留在这里。请先检查终端，再重新发送。",
 };

@@ -2,8 +2,8 @@ import { useRef, useState } from "react";
 import { ArrowUp, Copy, X } from "lucide-react";
 import type { PendingMessageView } from "../lib/pendingMessages.ts";
 import { copyText } from "../lib/clipboard.ts";
-import { submitNote } from "../lib/compose.ts";
-import { useT } from "../lib/i18n.ts";
+import { openCodeAgentChange, submitNote } from "../lib/compose.ts";
+import { useT, type Vars } from "../lib/i18n.ts";
 import "./PendingMessages.css";
 
 interface Props {
@@ -26,13 +26,17 @@ interface Props {
  * holds it on the bridge: a copy restored from storage (another tab's live hold, or one from before
  * a reload) is reviewed first, since the tab that held it may still send it.
  */
-export function pendingStatus(message: Pick<PendingMessageView, "state" | "error" | "serverOwned">, busy: boolean, t: (text: string) => string): string {
+export function pendingStatus(message: Pick<PendingMessageView, "state" | "error" | "serverOwned">, busy: boolean, t: (text: string, vars?: Vars) => string): string {
   if (busy) return t("Sending…");
   if (message.state === "queued") return t("Next turn");
   if (message.error?.code === "pi_transcript_pending") return t("Sent to Pi · waiting for transcript");
   if (message.error?.code === "transcript_unconfirmed" || message.error?.code === "pi_transcript_target_changed") return t("Sent to Pi · transcript confirmation unavailable");
   if (message.state === "held" && !message.error && message.serverOwned) return t("Waits for Send now");
-  if (message.state === "uncertain") return t("Not confirmed. Check the terminal before sending again.");
+  if (message.state === "uncertain") {
+    const changed = message.error?.code === "submit_changed" ? openCodeAgentChange(message.error.message) : null;
+    return changed ? t("Tab switched OpenCode's agent from {from} to {to}. Nothing more was typed. Check the terminal before sending again.", changed)
+      : t("Not confirmed. Check the terminal before sending again.");
+  }
   return t("Held message — review and send");
 }
 

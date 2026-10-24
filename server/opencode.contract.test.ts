@@ -609,6 +609,94 @@ process.stdin.on("data", (chunk) => {
     check();
   });
 
+  it("delivers a queued message completely when Tab leaves the skill unconfirmed", async () => {
+    const acceptedPath = join(nativeRoot, "accepted.txt");
+    const accepted = readFileSync(acceptedPath, "utf8");
+    const unconfirmed = readFileSync(join(nativeRoot, "screen.txt"), "utf8");
+    const { ws, frame } = await socket();
+    const before = typed().length;
+    try {
+      writeFileSync(acceptedPath, unconfirmed);
+      const ready = frame((message) => message.type === "input-ready" && message.pane_id === nativePane);
+      ws.send(JSON.stringify({ type: "attach", pane_id: nativePane, cols: 80, rows: 24 }));
+      await ready;
+      await reportState("working");
+      await browserCatalog();
+      const queued = frame((message) => message.type === "submit-result" && message.id === 1494);
+      ws.send(JSON.stringify({ type: "submit", id: 1494, pane_id: nativePane, text: "@effect fallback", payload: "@effect fallback", delivery: "queue" }));
+      expect(await queued).toMatchObject({ ok: true, pending: { state: "queued" } });
+      const settled = frame((message) => message.type === "pending-messages" && (
+        Array.isArray(message.removed) && message.removed.length > 0
+        || Array.isArray(message.messages) && message.messages.some((entry) => entry.state === "uncertain" || entry.state === "held")));
+      await reportState("idle");
+      const receipt = await settled;
+      expect(receipt).toMatchObject({ removed: [{ outcome: "sent" }] });
+      expect(await typedSince(before)).toBe("@effect\t\u001b[200~ fallback\u001b[201~\r");
+      const outcome = (await outcomesAt(server.port, nativePane)).find((entry) => entry.text === "@effect fallback");
+      expect(outcome).toMatchObject({ state: "terminal-required", unattached_skills: ["effect"] });
+    } finally {
+      writeFileSync(acceptedPath, accepted);
+      ws.close();
+      await reportState("idle");
+    }
+  });
+
+  it.each(["immediate", "queue"] as const)("refuses a confirmed Tab agent switch during %s delivery without Enter", async (delivery) => {
+    const selectedPath = join(nativeRoot, "screen.txt");
+    const acceptedPath = join(nativeRoot, "accepted.txt");
+    const selected = readFileSync(selectedPath, "utf8");
+    const accepted = readFileSync(acceptedPath, "utf8");
+    const { ws, frame } = await socket();
+    const before = typed().length;
+    let uncertainId: string | undefined;
+    try {
+      await browserCatalog();
+      writeFileSync(selectedPath, selected.replace("MiniMax", "Build · MiniMax"));
+      writeFileSync(acceptedPath, accepted.replace("MiniMax", "Plan · MiniMax"));
+      if (delivery === "queue") {
+        const ready = frame((message) => message.type === "input-ready" && message.pane_id === nativePane);
+        ws.send(JSON.stringify({ type: "attach", pane_id: nativePane, cols: 80, rows: 24 }));
+        await ready;
+        const working = frame((message) => message.type === "pane-status" && message.pane_id === nativePane && message.agent_status === "working");
+        await reportState("working");
+        await working;
+      }
+      const submitted = frame((message) => message.type === "submit-result" && message.id === 1493);
+      ws.send(JSON.stringify({ type: "submit", id: 1493, pane_id: nativePane, text: "@effect switched agent", payload: "@effect switched agent", ...(delivery === "queue" ? { delivery } : {}) }));
+      if (delivery === "queue") {
+        expect(await submitted).toMatchObject({ ok: true, pending: { state: "queued" } });
+        const refused = frame((message) => message.type === "pending-messages" && Array.isArray(message.messages)
+          && message.messages.some((entry) => entry.state === "uncertain" && entry.error?.code === "submit_changed"));
+        await reportState("idle");
+        const result = await refused;
+        const item = (result.messages as Array<{ id: string; state: string; error?: { code: string; message: string } }>).find((entry) => entry.state === "uncertain");
+        uncertainId = item?.id;
+        expect(item?.error).toMatchObject({ code: "submit_changed" });
+        expect(item?.error?.message).toContain(JSON.stringify("Build"));
+        expect(item?.error?.message).toContain(JSON.stringify("Plan"));
+      } else {
+        const result = await submitted;
+        expect(result).toMatchObject({ ok: false, code: "submit_changed" });
+        expect(result.message).toEqual(expect.stringContaining(JSON.stringify("Build")));
+        expect(result.message).toEqual(expect.stringContaining(JSON.stringify("Plan")));
+      }
+      expect(typed().slice(before)).toBe("@effect\t");
+      const outcome = (await outcomesAt(server.port, nativePane)).find((entry) => entry.text === "@effect switched agent");
+      expect(outcome).toBeUndefined();
+    } finally {
+      writeFileSync(selectedPath, selected);
+      writeFileSync(acceptedPath, accepted);
+      // an uncertain message holds every later queued send to this shared pane until it is discarded
+      if (uncertainId) {
+        const discarded = frame((message) => message.type === "pending-result" && message.id === 1495);
+        ws.send(JSON.stringify({ type: "pending-action", id: 1495, pane_id: nativePane, pending_id: uncertainId, action: "discard" }));
+        expect(await discarded).toMatchObject({ ok: true });
+      }
+      ws.close();
+      await reportState("idle");
+    }
+  });
+
   it("attaches @effect and records the send after the pane's OpenCode session changed, with no catalog request since", async () => {
     const { ws, frame } = await socket();
     const before = typed().length;
@@ -662,7 +750,7 @@ process.stdin.on("data", (chunk) => {
     }
   });
 
-  it("types within the attach budget and records terminal-required with the note when the service hangs", async () => {
+  it("types within the attach budget without inventing a skill record when a cold service hangs", async () => {
     const { ws, frame } = await socket();
     const before = typed().length;
     const first = Promise.withResolvers<boolean>();
@@ -708,8 +796,7 @@ process.stdin.on("data", (chunk) => {
       expect(sent.startsWith("@effect\t")).toBe(false);
       expect(sent).toContain("@effect while hung");
       const outcome = (await outcomesAt(server.port, nativePane)).find((entry) => entry.text === "@effect while hung");
-      expect(outcome?.state).toBe("terminal-required");
-      expect(outcome?.note).toContain("@effect");
+      expect(outcome).toBeUndefined();
     } finally {
       clearTimeout(deadlineTimer);
       timers.mockRestore();
@@ -809,7 +896,7 @@ process.stdin.on("data", (chunk) => {
       const response = await fetch(`http://127.0.0.1:${server.port}/api/pane/commands?pane_id=${encodeURIComponent(nativePane)}`);
       expect(response.status).toBe(200);
       const routeMs = performance.now() - started;
-      // a cold send to a hung service falls back to the scan, which reads opencode.json
+      // a cold send to a hung service must not scan opencode.json or invent a skill record
       closeOpenCodeNative();
       forgetOpenCodeService();
       extraSessions.add("ses_contractFifo01");
@@ -826,7 +913,7 @@ process.stdin.on("data", (chunk) => {
       expect(gap).toBeLessThan(2_000);
       expect(await typedSince(before)).toContain("@effect past the fifo");
       const outcome = (await outcomesAt(server.port, nativePane)).find((entry) => entry.text === "@effect past the fifo");
-      expect(outcome?.state).toBe("terminal-required");
+      expect(outcome).toBeUndefined();
     } finally {
       writer.kill();
       rmSync(fifo, { force: true });

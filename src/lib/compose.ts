@@ -109,8 +109,26 @@ export function sameMessage(a: string, b: string): boolean {
   const bare = (text: string): string => text.replace(/[\s\u00a0]+/gu, "");
   return bare(a) !== "" && bare(a) === bare(b);
 }
+
+/** Agent names in this server refusal are JSON strings, so custom names cannot confuse the fields. */
+export function openCodeAgentChange(message: string): { from: string; to: string } | null {
+  const match = /^Tab switched OpenCode's agent from ("(?:[^"\\]|\\.)*") to ("(?:[^"\\]|\\.)*")\. Nothing more was typed\.$/u.exec(message);
+  if (!match) return null;
+  try {
+    const from: unknown = JSON.parse(match[1]!);
+    const to: unknown = JSON.parse(match[2]!);
+    return typeof from === "string" && typeof to === "string" ? { from, to } : null;
+  } catch {
+    return null;
+  }
+}
+
 /** `agent`: the pane's agent, which names the input an input_draft refusal is about (Claude Code's when unknown) */
 export function submitNote(code: string, message: string, agent?: string | null): string {
+  const changed = code === "submit_changed" ? openCodeAgentChange(message) : null;
+  if (changed) return t("Tab switched OpenCode's agent from {from} to {to}. Nothing more was typed. Check the terminal before sending again.", changed);
+  // the server's refusal when Tab attached a skill other than the one typed (server/opencode-skill-attach.ts)
+  if (code === "submit_changed" && message === "OpenCode attached another skill. Your chat text stayed here. Check the terminal before sending again.") return t("OpenCode attached another skill. Your chat text stayed here. Check the terminal before sending again.");
   if (code === "submit_partial") return t("Not confirmed: the terminal draft was cleared or may have changed. Your message stayed here. Check the terminal before sending again.");
   if (code === "agent_blocked") return t("Not sent: the agent is waiting for an answer in the terminal. Answer it first.");
   if (code === "read_only") return t("Not sent: this view only watches the pane.");
