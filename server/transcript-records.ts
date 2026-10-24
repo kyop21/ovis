@@ -157,7 +157,7 @@ export function piNotice(value: unknown): Extract<ConversationPart, { kind: "not
   return typeof entry.customType === "string" ? { kind: "notice", text, source: entry.customType } : { kind: "notice", text };
 }
 
-const OMO_TASK_RESULT_MAX = 16_000;
+export const OMO_TASK_RESULT_MAX = 16_000;
 const label = (value: unknown): string | null => typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 const amount = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 

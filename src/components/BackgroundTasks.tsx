@@ -33,10 +33,11 @@ const NODE_ICONS: Record<OmoRunNode["state"], ComponentType<LucideProps>> = {
  * ended is one line that says how many ended and how many went wrong, and opens on request.
  * The server keeps the newest ten ended tasks and five ended workflows of the last day, so the
  * line counts those, and says "recently", not "in the last day".
- * A Claude pane's tasks are its subagents. Most Claude panes have none, so it asks when
- * the pane is shown (and when its count changes), and appears only when there are or were some.
+ * A Claude Code or OpenCode pane's tasks are its subagents (`subagents`). Most such panes have
+ * none, so it asks when the pane is shown (and when its count changes), and appears only when
+ * there are or were some.
  */
-export function BackgroundTasks({ paneId, count, omo, claude = false, plan = null }: { paneId: string; count: number; omo: boolean; claude?: boolean; plan?: PlanSummary | null }) {
+export function BackgroundTasks({ paneId, count, omo, subagents = false, plan = null }: { paneId: string; count: number; omo: boolean; subagents?: boolean; plan?: PlanSummary | null }) {
   const t = useT();
   const { fetchPaneOmoActivity, fetchPanePlan } = useMachineApi();
   const machineId = useMachineId();
@@ -55,7 +56,7 @@ export function BackgroundTasks({ paneId, count, omo, claude = false, plan = nul
   const [seen, setSeen] = useState(count > 0);
   useEffect(() => { if (count > 0) setSeen(true); }, [count]);
   useEffect(() => {
-    if (!claude || count > 0) return;
+    if (!subagents || count > 0) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     // The server answers within a second with what it knows, so a pane whose session it is still
@@ -68,7 +69,7 @@ export function BackgroundTasks({ paneId, count, omo, claude = false, plan = nul
     ask(3);
     return () => { alive = false; clearTimeout(timer); };
     // asked when the pane is shown and again when its count changes
-  }, [claude, paneId, count]);
+  }, [subagents, paneId, count]);
   const [tasks, setTasks] = useState<OmoTask[] | null>(null);
   const [runs, setRuns] = useState<OmoRun[]>([]);
   const [failed, setFailed] = useState(false);

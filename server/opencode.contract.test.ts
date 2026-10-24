@@ -221,6 +221,72 @@ it("keeps the terminal for a session the store does not hold", async () => {
   expect((await read()).source).toBe("opencode-transcript");
 });
 
+it("counts an OpenCode pane's running subagent, holds the turn that ends meanwhile as BG, and leaves its card when it ends", async () => {
+  const PARENT = "ses_contractSubagents";
+  const CHILD = "ses_contractChild01";
+  // the columns child sessions came with (2.0.26 on): this store began as a 2.0.24 one
+  for (const column of ["parent_id text", "agent text", "model text"]) db.exec(`ALTER TABLE session_v2 ADD COLUMN ${column}`);
+  db.query("INSERT INTO session_v2 (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES (?, 'global', 'contract', ?, 'Contract', '2.0.32', 0, 0)").run(PARENT, root);
+  add("user", { time: { created: Date.now() }, text: "scan it in the background", files: [], agents: [] }, PARENT);
+  db.query("INSERT INTO session_v2 (id, project_id, parent_id, slug, directory, title, version, agent, time_created, time_updated) VALUES (?, 'global', ?, 'child', ?, 'Scan the repo', '2.0.32', 'explore', ?, ?)").run(CHILD, PARENT, root, Date.now(), Date.now());
+  add("user", { time: { created: Date.now() }, text: "You are a subagent spawned by another session.\nscan" }, CHILD);
+  const target = await startOpencode(PARENT);
+  // a server of its own, whose OpenCode state holds no service: never the machine's own service.json
+  const own = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "state-subagents"), opencodeDb: database, openCodeStateDir: join(root, "no-service") });
+  // its status subscription is up before the turn is reported, or the turn's events go by unseen
+  await own.statusReady;
+  const base = `http://127.0.0.1:${own.port}`;
+  const ws = new WebSocket(`ws://127.0.0.1:${own.port}/ws`);
+  const frames: Record<string, unknown>[] = [];
+  const waiters = new Set<() => void>();
+  ws.addEventListener("message", (event) => { frames.push(JSON.parse(String(event.data)) as Record<string, unknown>); for (const wake of waiters) wake(); });
+  await new Promise((resolve) => ws.addEventListener("open", resolve, { once: true }));
+  // only a frame received after `from` (the frame count before the step it should follow) answers
+  const frame = (match: (frame: Record<string, unknown>) => boolean, what: string, from = 0) => new Promise<Record<string, unknown>>((resolve, reject) => {
+    const timeout = setTimeout(() => { waiters.delete(check); reject(new Error(`no frame: ${what}`)); }, 15_000);
+    const check = () => { const found = frames.slice(from).find((seen) => seen.type === "pane-status" && seen.pane_id === target && match(seen)); if (found) { clearTimeout(timeout); waiters.delete(check); resolve(found); } };
+    waiters.add(check);
+    check();
+  });
+  const reportState = (state: string) => herdrRpc("pane.report_agent", { pane_id: target, source: "herdr:opencode", agent: "opencode", agent_session_id: PARENT, state });
+  try {
+    const started = frames.length;
+    await reportState("working");
+    await frame((seen) => seen.agent_status === "working", "the turn at work", started);
+    // a snapshot names the pane and its session to the tracker, which counts the child from the store:
+    // this one, or one the server took on its own since the turn started, which said it first
+    await fetch(`${base}/api/session`);
+    await frame((seen) => seen.background_tasks === 1, "the running subagent counted", started);
+    let from = frames.length;
+    await reportState("idle");
+    // the turn ended while its subagent runs: BG, not DONE
+    expect(await frame((seen) => seen.background_wait === true, "the turn held on its subagent", from)).toMatchObject({ background_tasks: 1 });
+    const { snapshot } = await (await fetch(`${base}/api/session`)).json() as { snapshot: { panes: { pane_id: string; background_tasks?: number; background_wait?: true }[] } };
+    expect(snapshot.panes.find((pane) => pane.pane_id === target)).toMatchObject({ background_tasks: 1, background_wait: true });
+    const listed = await (await fetch(`${base}/api/pane/omo-tasks?pane_id=${encodeURIComponent(target)}`)).json() as { tasks: { id: string; title: string; category: string | null; status: string }[] };
+    expect(listed.tasks.map((task) => [task.id, task.title, task.category, task.status])).toEqual([[CHILD, "Scan the repo", "explore", "running"]]);
+
+    // it ends, and OpenCode wakes the parent with its answer
+    from = frames.length;
+    add("assistant", { time: { created: Date.now(), completed: Date.now() }, finish: "stop", content: [{ type: "text", text: "Three TODOs." }] }, CHILD);
+    add("idle", { time: { created: Date.now() }, outcome: "succeeded" }, CHILD);
+    add("synthetic", {
+      time: { created: Date.now() }, description: "Scan the repo", metadata: { source: "subagent", childID: CHILD, agent: "explore", state: "completed" },
+      text: `<subagent sessionID="${CHILD}" state="completed" description="Scan the repo">\nThree TODOs.\n</subagent>`,
+    }, PARENT);
+    await frame((seen) => seen.background_tasks === 0, "the ended subagent no longer counted", from);
+    const ended = await (await fetch(`${base}/api/pane/omo-tasks?pane_id=${encodeURIComponent(target)}`)).json() as { tasks: { id: string; status: string }[] };
+    expect(ended.tasks.map((task) => [task.id, task.status])).toEqual([[CHILD, "completed"]]);
+    const response = await fetch(`${base}/api/pane/conversation?${new URLSearchParams({ pane_id: target })}`);
+    expect(response.status).toBe(200);
+    const conversation = await response.json() as ConversationResponse;
+    expect(conversation.turns.at(-1)?.parts).toEqual([{ kind: "task_result", tasks: [expect.objectContaining({ id: CHILD, title: "Scan the repo", agent: "explore", status: "completed", result: "Three TODOs." })] }]);
+  } finally {
+    ws.close();
+    own.stop();
+  }
+}, 60_000);
+
 
 /**
  * OpenCode v2's own service, faked in the pinned OpenAPI shapes (843a6c51): /api/info, a session,
