@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 
 import { GJC_NATIVE_DIRECTORY, type GjcNativeBinding } from "../shared/gjc-native.ts";
-import { forgetGjcPane, forgetGjcState, gjcPidUnderShell, gjcSessionFile, gjcTranscriptForPane, isGjcProcess, parseGjcPs, recentProcessTable, storeRelative, terminalBreadcrumb } from "./gjc-runtime.ts";
+import { forgetGjcPane, forgetGjcState, gjcPidUnderShell, gjcSessionFile, gjcTranscriptForPane, isGjcProcess, recentProcessTable, storeRelative, terminalBreadcrumb } from "./gjc-runtime.ts";
 
 const tempDir = (prefix: string) => realpathSync(mkdtempSync(join(tmpdir(), prefix)));
 
@@ -17,12 +17,6 @@ it("recognizes native and interpreter-launched gjc, not look-alikes", () => {
   expect(isGjcProcess(["gjc-helper"])).toBe(false);
   expect(isGjcProcess(["node", "/tmp/gjc/server.js"])).toBe(false);
   expect(isGjcProcess([])).toBe(false);
-});
-
-it("reads macOS terminal/process identity without /proc", () => {
-  expect(parseGjcPs("ttys003 Mon Sep 28 10:00:00 2026\n")?.id).toBe("ttys003");
-  expect(parseGjcPs("?? Mon Sep 28 10:00:00 2026")).toBeNull();
-  expect(parseGjcPs("ttys003 invalid")).toBeNull();
 });
 
 it("validates breadcrumbs against process age, canonical cwd and the native session store", () => {

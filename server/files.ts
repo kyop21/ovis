@@ -53,7 +53,8 @@ function listedNames(output: Uint8Array): string[] | null {
   return Buffer.from(output.buffer, output.byteOffset, output.byteLength).toString("utf8").split("\0").filter(Boolean);
 }
 
-async function gitFiles(cwd: string): Promise<string[] | null> {
+/** The listing, at most `limit` names of it; null when git failed, overran its cap or its deadline. */
+async function gitFiles(cwd: string, limit = MAX_GIT_ENTRIES): Promise<string[] | null> {
   const { deadlineMs, maxBytes } = gitList;
   let proc: Bun.Subprocess<"ignore", "pipe", "ignore">;
   try {
@@ -86,7 +87,7 @@ async function gitFiles(cwd: string): Promise<string[] | null> {
     const exitCode = await proc.exited;
     if (stopped || exitCode !== 0) return null;
     const names = listedNames(Buffer.concat(chunks));
-    return names && [...new Set(names)].slice(0, MAX_GIT_ENTRIES);
+    return names && [...new Set(names)].slice(0, limit);
   } finally {
     clearTimeout(timer);
   }
@@ -173,39 +174,19 @@ export async function paneFiles(cwd: string, query = "", limit = 20): Promise<st
 
 const walked = new Map<string, { expires: number; files: string[] }>();
 
-/** `gitFiles` for a lookup that answers at once, not cut to MAX_GIT_ENTRIES: a name is matched against every path. */
-function gitFilesNow(cwd: string): string[] | null {
-  const { deadlineMs, maxBytes } = gitList;
-  let proc;
-  try {
-    proc = Bun.spawnSync(gitListArgv(cwd), {
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-      env: gitEnvironment(),
-      timeout: deadlineMs,
-      maxBuffer: maxBytes,
-      killSignal: "SIGKILL",
-    });
-  } catch {
-    return null;
-  }
-  // a listing past its cap or deadline may end in half a name, even when git exited 0
-  if (proc.exitCode !== 0 || proc.exitedDueToTimeout || proc.exitedDueToMaxBuffer || proc.stdout.byteLength > maxBytes) return null;
-  return listedNames(proc.stdout);
-}
-
 /**
  * The files under `cwd` whose path ends in `name` (a bare `demo.mp4`, or `screenshots/demo.mp4`),
  * for a path an agent wrote without its folders. The git inventory comes first, whole, so a
  * folder of thousands of files cannot hide the one named; the bounded walk follows, since that
- * inventory leaves out ignored files (build output, recordings).
+ * inventory leaves out ignored files (build output, recordings). The listing is awaited, not
+ * waited for: a slow git in a large repository must not hold every other request (#1404).
  */
-export function filesNamed(cwd: string, name: string, limit = 10, anyForm = false): string[] {
+export async function filesNamed(cwd: string, name: string, limit = 10, anyForm = false): Promise<string[]> {
   const suffix = anyForm ? name.replace(/^\.\//, "").normalize("NFC") : name.replace(/^\.\//, "");
   let hit = walked.get(cwd);
   if (!hit || hit.expires <= Date.now()) {
-    hit = { expires: Date.now() + CACHE_MS, files: [...new Set([...gitFilesNow(cwd) ?? [], ...walkFiles(cwd)])] };
+    // not cut to MAX_GIT_ENTRIES: a name is matched against every path
+    hit = { expires: Date.now() + CACHE_MS, files: [...new Set([...await gitFiles(cwd, Infinity) ?? [], ...walkFiles(cwd)])] };
     walked.set(cwd, hit);
     if (walked.size > 16) walked.delete(walked.keys().next().value!);
   }

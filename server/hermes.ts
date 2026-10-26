@@ -1,5 +1,4 @@
 import { Database } from "bun:sqlite";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
@@ -10,6 +9,7 @@ import { herdrRpc } from "./herdr/client.ts";
 import { answerVersion, ConversationNotStarted, ConversationUnavailable, type ConversationPage, HistoryChanged, type RecognizedConversation, TRANSCRIPT_WINDOW_BYTES } from "./conversation-shared.ts";
 import { toolSummary } from "./transcript-records.ts";
 import { TOOL_OUTPUT_CHARS, trimOutput } from "./tool-output.ts";
+import { darwinTerminal } from "./darwin-process.ts";
 import { processStartedAt } from "./process-start.ts";
 import { hermesSkillPrompt } from "./skill-activity.ts";
 
@@ -143,10 +143,9 @@ export function hermesTerminalId(pid: number): string | null {
       return `tty-${tty.slice(1).replaceAll("/", "-")}`;
     }
     if (process.platform === "darwin") {
-      const output = execFileSync("ps", ["-p", String(pid), "-o", "tty="], {
-        encoding: "utf8", timeout: 1500, maxBuffer: 4096, stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      if (!output || output === "??") return null;
+      // the kernel's record, as `ps -o tty=` read it, without a child process that holds the event loop
+      const output = darwinTerminal(pid);
+      if (!output) return null;
       const device = output.startsWith("/dev/") ? output.slice(5) : output.startsWith("ttys") ? `dev-${output}` : output;
       return `tty-${device.replaceAll("/", "-")}`;
     }

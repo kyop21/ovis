@@ -1,10 +1,10 @@
 /** GJC transcript identity is published by its lifecycle extension; shared terminal/store helpers are also used by omp. */
 
-import { execFileSync } from "node:child_process";
 import { closeSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, statSync } from "node:fs";
 import nodePath, { join, type PlatformPath } from "node:path";
 
 import { readGjcNativeBinding, validateGjcNativeTranscript } from "./gjc-native.ts";
+import { darwinTerminal } from "./darwin-process.ts";
 import { herdrRpc } from "./herdr/client.ts";
 import { processStartedAt, processStartedAtAsync } from "./process-start.ts";
 import { descendantArgv, windowsProcessTable, type ProcessRow } from "./windows-processes.ts";
@@ -143,23 +143,13 @@ export function gjcTerminal(pid: number, environ?: readonly string[] | null): Gj
       return { id: tty.slice(5).replaceAll("/", "-"), startedAt };
     }
     if (process.platform === "darwin") {
-      // lstart is local time without a zone: print it in the zone Date.parse reads it in,
-      // which is not always $TZ (bun test runs in UTC without setting it)
-      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const output = execFileSync("ps", ["-p", String(pid), "-o", "tty=", "-o", "lstart="], {
-        encoding: "utf8", timeout: 1500, maxBuffer: 4096, env: { ...process.env, LC_ALL: "C", TZ: zone }, stdio: ["ignore", "pipe", "ignore"],
-      });
-      return parseGjcPs(output);
+      // the kernel's record, as `ps -o tty=` read it, without a child process that holds the event loop
+      const tty = darwinTerminal(pid);
+      const startedAt = processStartedAt(pid);
+      return tty !== null && /^ttys\d+$/.test(tty) && startedAt !== null ? { id: tty, startedAt } : null;
     }
   } catch { /* process exited or its terminal metadata is unavailable */ }
   return null;
-}
-
-export function parseGjcPs(output: string): GjcTerminal | null {
-  const match = output.trim().match(/^(?:\/dev\/)?(ttys\d+)\s+(.+)$/);
-  if (!match) return null;
-  const startedAt = Date.parse(match[2]!);
-  return Number.isFinite(startedAt) ? { id: match[1]!, startedAt } : null;
 }
 
 /**
