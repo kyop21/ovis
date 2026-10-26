@@ -60,12 +60,28 @@ export function darwinStartTime(pid: number): bigint | null {
   return answer === null ? null : procStartTime(answer);
 }
 
-/** The name of the process's controlling terminal under /dev (`ttys003`), as `ps -o tty=` prints it; null without one. */
-export function darwinTerminal(pid: number): string | null {
-  const answer = kinfoProc(pid);
-  const device = answer === null ? null : procTerminalDevice(answer);
-  if (device === null) return null;
+/** A character device's name under /dev (`ttys003`), or null when it has none. */
+function deviceName(device: number): string | null {
   const symbols = libSystem ??= openLibSystem();
   const name = symbols.devname(device, 0o020000); // S_IFCHR
   return name === null ? null : String(name) || null;
+}
+
+/**
+ * The process's controlling terminal under /dev (`ttys003`, as `ps -o tty=` prints it) and its start
+ * in ms, both from one kinfo_proc: two reads could describe two processes when the PID is reused
+ * between them. Null when no such process runs or it has no terminal. `read` and `name` stand in for
+ * the kernel in tests.
+ */
+export function darwinTerminal(
+  pid: number,
+  read: (pid: number) => Uint8Array | null = kinfoProc,
+  name: (device: number) => string | null = deviceName,
+): { tty: string; startedAt: number } | null {
+  const answer = read(pid);
+  if (answer === null) return null;
+  const started = procStartTime(answer);
+  const device = procTerminalDevice(answer);
+  const tty = started === null || device === null ? null : name(device);
+  return tty === null ? null : { tty, startedAt: Number(started! / 1000n) };
 }

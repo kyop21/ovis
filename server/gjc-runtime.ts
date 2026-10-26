@@ -143,10 +143,10 @@ export function gjcTerminal(pid: number, environ?: readonly string[] | null): Gj
       return { id: tty.slice(5).replaceAll("/", "-"), startedAt };
     }
     if (process.platform === "darwin") {
-      // the kernel's record, as `ps -o tty=` read it, without a child process that holds the event loop
-      const tty = darwinTerminal(pid);
-      const startedAt = processStartedAt(pid);
-      return tty !== null && /^ttys\d+$/.test(tty) && startedAt !== null ? { id: tty, startedAt } : null;
+      // the terminal and the start from one kernel record, as `ps -o tty= -o lstart=` read them, without a
+      // child process that holds the event loop
+      const record = darwinTerminal(pid);
+      return record !== null && /^ttys\d+$/.test(record.tty) ? { id: record.tty, startedAt: record.startedAt } : null;
     }
   } catch { /* process exited or its terminal metadata is unavailable */ }
   return null;
