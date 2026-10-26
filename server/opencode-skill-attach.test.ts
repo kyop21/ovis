@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { OPENCODE_SKILL_ACCEPT_KEY, OPENCODE_SKILL_ROW_WAIT_MS, skillAccepted, skillRowSelected, skillTokens, typeWithSkills, type SkillAttachIo } from "./opencode-skill-attach.ts";
+import { OPENCODE_SKILL_ACCEPT_KEY, OPENCODE_SKILL_ACCEPT_WAIT_MS, OPENCODE_SKILL_ROW_WAIT_MS, skillAccepted, skillRowSelected, skillTokens, typeWithSkills, type SkillAttachIo } from "./opencode-skill-attach.ts";
 
 const fixture = (width: "narrow" | "wide") => readFileSync(join(import.meta.dir, "fixtures", `opencode-autocomplete-2.0.32-skill-${width}.txt`), "utf8");
 /** OpenCode 2.0.32 recorded with its colours: three rows (@effect, @effect-two, effect.ts) with one selected, then accepted or closed */
@@ -41,7 +41,7 @@ function pane(screens: (writes: string[]) => string): SkillAttachIo & { writes: 
 }
 
 /** The recorded screen may lag the input; Tab changes the simulated input independently. */
-function simulatedInput(screen: (now: number) => string, afterTab: string, before = ansi("first-selected")): SkillAttachIo & { input: () => string; entered: () => boolean } {
+function simulatedInput(screen: (now: number) => string, afterTab: string, before = ansi("first-selected")): SkillAttachIo & { writes: string[]; input: () => string; entered: () => boolean } {
   let input = "";
   let entered = false;
   const io: SkillAttachIo & { writes: string[] } = pane((writes) => writes.includes(`keys:${OPENCODE_SKILL_ACCEPT_KEY}`) ? screen(io.now()) : before);
@@ -287,6 +287,24 @@ describe("typeWithSkills", () => {
     const screens = [ansi("accepted").replace("Build", "Plan "), ansi("accepted")];
     const io = pane((writes) => writes.includes(`keys:${OPENCODE_SKILL_ACCEPT_KEY}`) ? screens.shift() ?? ansi("accepted") : ansi("first-selected"));
     expect(await typeWithSkills("@effect go", ["effect"], () => true, io, async () => {})).toEqual({ attached: ["effect"], missed: [], prompt: [{ typed: "@effect " }, { pasted: "go" }] });
+  });
+
+  it.each(["shows first on the deadline read", "shows on a first read that used the whole budget"])("refuses an agent switch that %s, with no remainder or Enter", async (timing) => {
+    const plain = withoutDropdown(ansi("first-selected"));
+    const switched = plain.replace("Build", "Plan ");
+    const io = simulatedInput((now) => now >= OPENCODE_SKILL_ACCEPT_WAIT_MS ? switched : plain, "@effect");
+    if (timing !== "shows first on the deadline read") {
+      const read = io.screen;
+      let spent = false;
+      io.screen = async () => {
+        if (io.writes.includes(`keys:${OPENCODE_SKILL_ACCEPT_KEY}`) && !spent) { spent = true; await io.wait(OPENCODE_SKILL_ACCEPT_WAIT_MS); }
+        return read();
+      };
+    }
+    const delivery = typeWithSkills("@effect go", ["effect"], () => true, io, async () => {}).then(async () => { await io.sendKeys(["Enter"], () => true); });
+    await expect(delivery).rejects.toMatchObject({ code: "submit_changed", message: expect.stringContaining(JSON.stringify("Plan")) });
+    expect(io.writes).toEqual(["text:@effect", `keys:${OPENCODE_SKILL_ACCEPT_KEY}`]);
+    expect(io.entered()).toBe(false);
   });
 
   it("stops at the first confirmed agent change before typing later skill tokens", async () => {

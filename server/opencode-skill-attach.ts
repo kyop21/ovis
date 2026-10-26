@@ -248,17 +248,20 @@ export async function typeWithSkills(text: string, skills: readonly string[], al
         let lastAgent: string | null = null;
         do {
           const screen = await io.screen();
+          const late = io.now() >= deadline;
           const state = promptState(screen, id, box.inputFg);
           if (state?.token != null && state.token !== id && (state.prefix === box.inputPrefix || !box.inputTokens.includes(state.token))) {
             throw new HerdrError("submit_changed", "OpenCode attached another skill. Your chat text stayed here. Check the terminal before sending again.");
           }
           if (state?.token === id && !autocomplete(screen, id)) insertedSpace ||= state.space;
-          if (from !== null && state?.agent != null && state.agent !== from && state.agent === lastAgent) {
+          // Two consistent reads confirm a switch. A switch still showing on the last read has had no second
+          // read, but it is not resolved either, and the rest and Enter would go to that other agent.
+          if (from !== null && state?.agent != null && state.agent !== from && (state.agent === lastAgent || late)) {
             throw new HerdrError("submit_changed", `Tab switched OpenCode's agent from ${JSON.stringify(from)} to ${JSON.stringify(state.agent)}. Nothing more was typed.`);
           }
           accepted = skillAccepted(screen, id, box.agent, box.inputFg);
           insertedSpace ||= accepted;
-          if (accepted || io.now() >= deadline) break;
+          if (accepted || late) break;
           lastAgent = state?.agent ?? null;
           await io.wait(ROW_POLL_MS);
         } while (true);
