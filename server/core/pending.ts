@@ -684,7 +684,7 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
     const launched = item.identity.processPid;
     if (launched == null || identity.terminalId !== item.identity.terminalId || identity.agent !== null) return false;
     return identity.processPid !== launched
-      // macOS reads a birth to the whole second (samePendingIdentity)
+      // macOS allows a second, as samePendingIdentity does
       || (item.identity.processBirth != null && identity.processBirth != null
         && Math.abs(identity.processBirth - item.identity.processBirth) > (process.platform === "darwin" ? 1000 : 0));
   }

@@ -403,12 +403,21 @@ describe("git inventories", () => {
     const { git, folder } = fakeGit((dir) => `read _ < "${dir}/go"\nprintf 'slow-name\\0'`);
     expect(Bun.spawnSync(["mkfifo", join(folder, "go")]).exitCode).toBe(0);
     setGitListOptions({ git });
-    let answered = false;
-    const named = filesNamed(root, "slow-name").finally(() => { answered = true; });
-    // a timer comes due while git still waits: the lookup holds no one else's turn (#1404)
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(answered).toBe(false);
-    await within(writeFile(join(folder, "go"), "\n"), 5_000, "git's release");
-    expect(await within(named, 5_000, "the name lookup")).toEqual(["slow-name"]);
+    const spawn = spyOn(Bun, "spawn");
+    try {
+      let answered = false;
+      const named = filesNamed(root, "slow-name").finally(() => { answered = true; });
+      // a second lookup of the folder meanwhile waits for the same listing, not a git of its own
+      const again = filesNamed(root, "api.ts");
+      // a timer comes due while git still waits: the lookup holds no one else's turn (#1404)
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(answered).toBe(false);
+      await within(writeFile(join(folder, "go"), "\n"), 5_000, "git's release");
+      expect(await within(named, 5_000, "the name lookup")).toEqual(["slow-name"]);
+      expect(await within(again, 5_000, "the second lookup")).toEqual(["src/api.ts"]);
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally {
+      spawn.mockRestore();
+    }
   });
 });

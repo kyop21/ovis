@@ -890,7 +890,7 @@ async function findAttachedJob(configDir: string, { ref, byName }: ClaudeAttach,
  */
 const attachedJobs = new Map<string, { pid: number; started: number; job: string | null; at: number }>();
 const MAX_ATTACHED_JOBS = 256;
-/** Two reads of one process's start differ by up to a second: macOS's ps counts whole seconds. */
+/** Two reads of one process's start: Linux's differ by a tick or two; macOS's are the kernel's own, kept to the margin they had when `ps` counted whole seconds. */
 const SAME_START_MS = 2000;
 const ATTACH_MISS_MS = 10_000;
 

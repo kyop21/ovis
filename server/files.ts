@@ -173,6 +173,8 @@ export async function paneFiles(cwd: string, query = "", limit = 20): Promise<st
 }
 
 const walked = new Map<string, { expires: number; files: string[] }>();
+/** One listing per folder at a time: lookups that arrive while it runs share it rather than start their own git. */
+const listing = new Map<string, Promise<string[]>>();
 
 /**
  * The files under `cwd` whose path ends in `name` (a bare `demo.mp4`, or `screenshots/demo.mp4`),
@@ -183,14 +185,23 @@ const walked = new Map<string, { expires: number; files: string[] }>();
  */
 export async function filesNamed(cwd: string, name: string, limit = 10, anyForm = false): Promise<string[]> {
   const suffix = anyForm ? name.replace(/^\.\//, "").normalize("NFC") : name.replace(/^\.\//, "");
-  let hit = walked.get(cwd);
-  if (!hit || hit.expires <= Date.now()) {
-    // not cut to MAX_GIT_ENTRIES: a name is matched against every path
-    hit = { expires: Date.now() + CACHE_MS, files: [...new Set([...await gitFiles(cwd, Infinity) ?? [], ...walkFiles(cwd)])] };
-    walked.set(cwd, hit);
-    if (walked.size > 16) walked.delete(walked.keys().next().value!);
+  const hit = walked.get(cwd);
+  let files = hit && hit.expires > Date.now() ? hit.files : undefined;
+  if (files === undefined) {
+    let shared = listing.get(cwd);
+    if (shared === undefined) {
+      // not cut to MAX_GIT_ENTRIES: a name is matched against every path
+      shared = gitFiles(cwd, Infinity).then((listed) => {
+        const found = [...new Set([...listed ?? [], ...walkFiles(cwd)])];
+        walked.set(cwd, { expires: Date.now() + CACHE_MS, files: found });
+        if (walked.size > 16) walked.delete(walked.keys().next().value!);
+        return found;
+      }).finally(() => listing.delete(cwd));
+      listing.set(cwd, shared);
+    }
+    files = await shared;
   }
-  return hit.files.filter((path) => {
+  return files.filter((path) => {
     const compared = anyForm ? path.normalize("NFC") : path;
     return compared === suffix || compared.endsWith(`/${suffix}`);
   }).sort().slice(0, limit);
@@ -199,4 +210,5 @@ export async function filesNamed(cwd: string, name: string, limit = 10, anyForm 
 export function clearFileCache(): void {
   cache.clear();
   walked.clear();
+  listing.clear();
 }
