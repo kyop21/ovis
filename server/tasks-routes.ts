@@ -39,12 +39,17 @@ export async function handleTasksRequest(request: Request, url: URL, pathname: s
           await claudeAgents.ensure(pane);
         })());
       }
-      const claude = claudeAgents.sessionOf(paneId);
       // an OpenCode pane's subagents are its child sessions; of a pane that ran both, the one it runs now
-      const opencode = opencodeAgents.sessionOf(paneId);
-      if (opencode !== null && (opencode.live || claude?.live !== true)) {
-        return jsonResponse({ tasks: (await opencodeAgents.tasksOf(paneId)) ?? [], runs: [], server_time });
+      const opencodeRuns = (): boolean => {
+        const opencode = opencodeAgents.sessionOf(paneId);
+        return opencode !== null && (opencode.live || claudeAgents.sessionOf(paneId)?.live !== true);
+      };
+      if (opencodeRuns()) {
+        const tasks = await opencodeAgents.tasksOf(paneId);
+        // read while the event loop went on: a pane that runs Claude Code now is answered with Claude's
+        if (opencodeRuns()) return jsonResponse({ tasks: tasks ?? [], runs: [], server_time });
       }
+      const claude = claudeAgents.sessionOf(paneId);
       return jsonResponse({ tasks: claude === null ? [] : claudeSubagents(claude.path, claude.live, Date.now(), claude.startedAt), runs: [], server_time });
     }
     return jsonResponse({ tasks: omoTasks(session.cwd, session.sessionId, processAlive), runs: omoRuns(session.cwd, session.sessionId), server_time });

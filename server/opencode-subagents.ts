@@ -113,7 +113,8 @@ interface KeptRun extends ChildRun { dispatched: number | null; title: string | 
  * OpencodeSubagentStatus.poll) however many children a session started:
  * 1. the children, a page at a time in the order they were stored: those whose run has not ended (each counts) and,
  *    of those that ended, the ten that ended last within the last day (no more are listed);
- * 2. the newest run rows of those kept, read in full, a page of them a step; then what they are;
+ * 2. the newest run rows of those kept, read in full and told what they are a page of them a step: each counts, and of
+ *    those that run only the newest thousand are listed (RUNNING_LIMIT), of the others the ten that ended last;
  * 3. with `detail`, what each listed one did, a few of them a step.
  */
 interface Scan {
@@ -121,7 +122,9 @@ interface Scan {
   /** session_v2's columns, once read; a store with no child sessions has nothing to read */
   columns: Set<string> | null; after: number; paged: boolean;
   open: string[]; ended: { id: string; at: number }[];
-  kept: KeptRun[]; reread: number;
+  /** phase 2: the ids to read again, how far, the ones read (a page read again after a failed try adds none twice) */
+  ids: string[] | null; reread: number; seen: Set<string>; promptAt: number | null;
+  running: number; turnRunning: number; going: KeptRun[]; stopped: { run: KeptRun; at: number; end: ReturnType<typeof runEnd> }[];
   state: OpencodeSubagentState | null; shown: { run: KeptRun; at: number | null; end: ReturnType<typeof runEnd> }[];
   work: Map<string, ReturnType<typeof childWork>>; worked: number;
   finished: boolean;
@@ -129,9 +132,11 @@ interface Scan {
 
 /** How many children's work one step reads (each is three reads of its rows) */
 const WORK_STEP = 50;
+/** How many running children are listed, the newest: each counts, however many run */
+export const RUNNING_LIMIT = 1000;
 
 function newScan(sessionId: string, now: number, live: boolean, serviceStart: number | null, detail: boolean): Scan {
-  return { sessionId, now, live, serviceStart, detail, columns: null, after: 0, paged: false, open: [], ended: [], kept: [], reread: 0, state: null, shown: [], work: new Map(), worked: 0, finished: false };
+  return { sessionId, now, live, serviceStart, detail, columns: null, after: 0, paged: false, open: [], ended: [], ids: null, reread: 0, seen: new Set(), promptAt: null, running: 0, turnRunning: 0, going: [], stopped: [], state: null, shown: [], work: new Map(), worked: 0, finished: false };
 }
 
 /** One step of a scan. */
@@ -173,9 +178,15 @@ function scanPage(db: Database, scan: Scan, columns: Set<string>): void {
   scan.paged = rows.length <= SUBAGENT_PAGE;
 }
 
-/** Phase 2: the next page of the kept children's rows in full; once all are in, what they are. */
+/** Phase 2: the next page of the kept children's rows in full, each told what it is; once all are in, what was found. */
 function rereadPage(db: Database, scan: Scan, columns: Set<string>): void {
-  const ids = [...scan.open, ...scan.ended.map((entry) => entry.id)];
+  if (scan.ids === null) {
+    const prompt = db.query<{ data: string; time_created: number }, [string]>(
+      "SELECT data, time_created FROM session_message WHERE session_id = ? AND type = 'user' ORDER BY seq DESC LIMIT 1",
+    ).get(scan.sessionId);
+    scan.promptAt = prompt === null ? null : stamp(record(parse(prompt.data).time).created) ?? prompt.time_created;
+    scan.ids = [...scan.open, ...scan.ended.map((entry) => entry.id)];
+  }
   const full = db.query<KeptRun, [string]>(`
     SELECT s.id, s.time_created AS created, m.type, m.time_created AS at,
       ${["outcome:$.outcome", "created_at:$.time.created", "completed:$.time.completed", "finish:$.finish", "error_type:$.error.type"]
@@ -184,27 +195,31 @@ function rereadPage(db: Database, scan: Scan, columns: Set<string>): void {
       (SELECT time_created FROM session_message WHERE session_id = s.id AND type IN ('user', 'synthetic') ORDER BY seq DESC LIMIT 1) AS dispatched,
       ${["title", "agent", "model"].map((name) => columns.has(name) ? `s.${name}` : `NULL AS ${name}`).join(", ")}
     FROM session_v2 AS s JOIN session_message AS m ON m.id = (${NEWEST}) WHERE s.id = ?`);
-  for (const id of ids.slice(scan.reread, scan.reread + SUBAGENT_PAGE)) { const run = full.get(id); if (run) scan.kept.push(run); }
-  scan.reread += SUBAGENT_PAGE;
-  if (scan.reread < ids.length) return;
-  const prompt = db.query<{ data: string; time_created: number }, [string]>(
-    "SELECT data, time_created FROM session_message WHERE session_id = ? AND type = 'user' ORDER BY seq DESC LIMIT 1",
-  ).get(scan.sessionId);
-  const promptAt = prompt === null ? null : stamp(record(parse(prompt.data).time).created) ?? prompt.time_created;
+  // the whole page is read before any of it is taken: a page that fails part way is read again whole
+  const page = scan.ids.slice(scan.reread, scan.reread + SUBAGENT_PAGE).filter((id) => !scan.seen.has(id)).flatMap((id) => full.get(id) ?? []);
   const lastAt = (run: ChildRun): number => stamp(run.completed) ?? stamp(run.created_at) ?? run.at;
   const orphan = (run: ChildRun): boolean => scan.serviceStart !== null && lastAt(run) < scan.serviceStart - START_SLACK_MS;
-  const ends = new Map(scan.kept.map((run) => [run.id, runEnd(run)]));
-  const going = scan.kept.filter((run) => ends.get(run.id) === null && scan.live && !orphan(run));
-  const goingIds = new Set(going.map((run) => run.id));
-  const stopped = scan.kept.filter((run) => !goingIds.has(run.id))
-    .map((run) => ({ run, at: ends.get(run.id)?.at ?? lastAt(run) }))
-    .filter((entry) => scan.now - entry.at <= RECENT_MS)
-    .sort((a, b) => b.at - a.at).slice(0, RECENT_LIMIT);
-  // one continued by its sessionID belongs to the turn that sent it its prompt
-  const turnRunning = promptAt === null ? going.length : going.filter((run) => (run.dispatched ?? run.created) >= promptAt).length;
-  scan.shown = [...going.sort((a, b) => a.created - b.created).map((run) => ({ run, at: null as number | null })), ...stopped]
-    .map(({ run, at }) => ({ run, at, end: ends.get(run.id) ?? null }));
-  scan.state = { tasks: [], running: going.length, turnRunning, promptAt };
+  for (const run of page) {
+    if (scan.seen.has(run.id)) continue;
+    scan.seen.add(run.id);
+    const end = runEnd(run);
+    if (end === null && scan.live && !orphan(run)) {
+      scan.running++;
+      // one continued by its sessionID belongs to the turn that sent it its prompt
+      if (scan.promptAt === null || (run.dispatched ?? run.created) >= scan.promptAt) scan.turnRunning++;
+      scan.going.push(run);
+      continue;
+    }
+    const at = end?.at ?? lastAt(run);
+    if (scan.now - at <= RECENT_MS) scan.stopped.push({ run, at, end });
+  }
+  // only what is listed is kept: the newest that run, the ten that ended (or were lost) last
+  scan.going = scan.going.sort((a, b) => b.created - a.created).slice(0, RUNNING_LIMIT);
+  scan.stopped = scan.stopped.sort((a, b) => b.at - a.at).slice(0, RECENT_LIMIT);
+  scan.reread += SUBAGENT_PAGE;
+  if (scan.reread < scan.ids.length) return;
+  scan.shown = [...[...scan.going].sort((a, b) => a.created - b.created).map((run) => ({ run, at: null as number | null, end: null })), ...scan.stopped];
+  scan.state = { tasks: [], running: scan.running, turnRunning: scan.turnRunning, promptAt: scan.promptAt };
   scan.finished = !scan.detail;
 }
 
@@ -342,10 +357,20 @@ export class OpencodeSubagentStatus {
   }
 
   /** A pane's list, as the background tasks route answers it; null when the store cannot be read now. */
+  /**
+   * A pane's list, as the background tasks route answers it; null when the store cannot be read now. The read lets the
+   * event loop go: a pane that comes to run another session (or stops running it) meanwhile is read again for that, so
+   * that the answer is the pane's own as it stands when it is given.
+   */
   async tasksOf(paneId: string): Promise<OmoTask[] | null> {
-    const known = this.sessionOf(paneId);
-    if (known === null) return [];
-    return (await pagedState(known.path, known.session, known.live, this.now(), this.deps.serviceStart?.() ?? null))?.tasks ?? null;
+    for (let tries = 0; tries < 3; tries++) {
+      const known = this.sessionOf(paneId);
+      if (known === null) return [];
+      const state = await pagedState(known.path, known.session, known.live, this.now(), this.deps.serviceStart?.() ?? null);
+      const now = this.sessionOf(paneId);
+      if (now?.path === known.path && now.session === known.session && now.live === known.live) return state?.tasks ?? null;
+    }
+    return null;
   }
 
   /** Numbers a read of herdr's panes as it begins, before it is awaited: what refresh and ensure are given. */

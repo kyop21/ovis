@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import type { HerdrPane } from "../shared/protocol.ts";
 import { handleTasksRequest } from "./tasks-routes.ts";
-import { opencodeSubagentState, OpencodeSubagentStatus, pagedState, SUBAGENT_PAGE } from "./opencode-subagents.ts";
+import { opencodeSubagentState, OpencodeSubagentStatus, pagedState, RUNNING_LIMIT, SUBAGENT_PAGE } from "./opencode-subagents.ts";
 
 const root = mkdtempSync(join(tmpdir(), "herdr-opencode-subagents-"));
 const opened: Database[] = [];
@@ -330,7 +330,11 @@ describe("the OpenCode subagent tracker", () => {
       busy.session(`ses_run${n}`, NOW - 5 * MIN + n);
       busy.prompt(`ses_run${n}`, NOW - 5 * MIN + n);
     }
-    expect(opencodeSubagentState(busy.path, busy.parent, true, NOW, null, false)?.running).toBe(SUBAGENT_PAGE + 5);
+    const all = opencodeSubagentState(busy.path, busy.parent, true, NOW, null, false)!;
+    expect(all.running).toBe(SUBAGENT_PAGE + 5);
+    // the newest of them are listed, oldest first
+    expect(all.tasks).toHaveLength(RUNNING_LIMIT);
+    expect(all.tasks[0]!.id).toBe(`ses_run${SUBAGENT_PAGE + 5 - RUNNING_LIMIT}`);
     const many = new OpencodeSubagentStatus({ store: () => busy.path, now: () => NOW, onChange: () => undefined });
     await many.refresh([pane(busy.parent)]);
     expect(many.countOf("w1:p1")).toBe(SUBAGENT_PAGE + 5);
@@ -366,6 +370,24 @@ describe("the OpenCode subagent tracker", () => {
     expect(tracker.countOf("w1:p1")).toBe(2);
     await again;
     expect(tracker.countOf("w1:p1")).toBe(2);
+  });
+
+  it("answers the route for the session the pane runs when the answer is given", async () => {
+    const s = store();
+    for (let n = 0; n < SUBAGENT_PAGE + 5; n++) {
+      s.session(`ses_done${n}`, NOW - 40 * MIN + n);
+      s.idle(`ses_done${n}`, NOW - 30 * MIN + n);
+    }
+    s.session("ses_working", NOW - 5 * MIN);
+    s.prompt("ses_working", NOW - 5 * MIN);
+    s.session("ses_other_child", NOW - 2 * MIN, { parent: "ses_other" });
+    s.prompt("ses_other_child", NOW - 2 * MIN);
+    const tracker = new OpencodeSubagentStatus({ store: () => s.path, now: () => NOW, onChange: () => undefined });
+    await tracker.refresh([pane(s.parent)]);
+    // the list is read a page a turn, and the pane moves to another session meanwhile
+    const asked = tracker.tasksOf("w1:p1");
+    void tracker.refresh([pane("ses_other")]);
+    expect((await asked)?.map((task) => [task.id, task.status])).toEqual([["ses_other_child", "running"]]);
   });
 
   it("never takes a read of a pane begun before one it already took", () => {
