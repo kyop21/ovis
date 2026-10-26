@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { HerdrPane } from "../shared/protocol.ts";
 import { handleTasksRequest } from "./tasks-routes.ts";
 import { opencodeSubagentState, OpencodeSubagentStatus, pagedState, RUNNING_LIMIT, SUBAGENT_PAGE } from "./opencode-subagents.ts";
+import { withStore } from "./opencode.ts";
 
 const root = mkdtempSync(join(tmpdir(), "herdr-opencode-subagents-"));
 const opened: Database[] = [];
@@ -231,7 +232,7 @@ describe("an OpenCode session's subagents are its child sessions", () => {
     const v1 = new Database(path, { create: true });
     opened.push(v1);
     v1.exec("CREATE TABLE session (id text PRIMARY KEY, title text); CREATE TABLE message (id text PRIMARY KEY, session_id text, data text);");
-    expect(opencodeSubagentState(path, "ses_parent", true, NOW)).toEqual({ tasks: [], running: 0, turnRunning: 0, promptAt: null });
+    expect(opencodeSubagentState(path, "ses_parent", true, NOW)).toEqual({ tasks: [], running: 0, turnRunning: 0, promptAt: null, unlisted: 0 });
     const garbage = join(root, "garbage.db");
     writeFileSync(garbage, "not a database at all, just text");
     expect(opencodeSubagentState(garbage, "ses_parent", true, NOW)).toBeNull();
@@ -274,7 +275,7 @@ describe("the OpenCode subagent tracker", () => {
     expect(tracker.countOf("w1:p1")).toBe(0);
     expect(changes.at(-1)).toEqual(["w1:p1", 0, 0, null]);
     expect(tracker.sessionOf("w1:p1")).toEqual({ path: s.path, session: s.parent, live: false });
-    expect((await tracker.tasksOf("w1:p1"))?.map((task) => [task.id, task.status])).toEqual([["ses_working", "lost"]]);
+    expect((await tracker.tasksOf("w1:p1"))?.tasks.map((task) => [task.id, task.status])).toEqual([["ses_working", "lost"]]);
     // back on that session, it counts again; then the pane runs a shell
     tracker.refresh([pane(s.parent)]);
     expect(tracker.countOf("w1:p1")).toBe(1);
@@ -332,6 +333,7 @@ describe("the OpenCode subagent tracker", () => {
     }
     const all = opencodeSubagentState(busy.path, busy.parent, true, NOW, null, false)!;
     expect(all.running).toBe(SUBAGENT_PAGE + 5);
+    expect(all.unlisted).toBe(SUBAGENT_PAGE + 5 - RUNNING_LIMIT);
     // the newest of them are listed, oldest first
     expect(all.tasks).toHaveLength(RUNNING_LIMIT);
     expect(all.tasks[0]!.id).toBe(`ses_run${SUBAGENT_PAGE + 5 - RUNNING_LIMIT}`);
@@ -372,6 +374,39 @@ describe("the OpenCode subagent tracker", () => {
     expect(tracker.countOf("w1:p1")).toBe(2);
   });
 
+  it("reads a page of rows that failed part way again whole, and counts no child twice", async () => {
+    const s = store();
+    for (const id of ["ses_a", "ses_b"]) {
+      s.session(id, NOW - 5 * MIN);
+      s.prompt(id, NOW - 5 * MIN);
+    }
+    // the store is held by its writer once, between the first and the second child's rows
+    let held = true;
+    const flaky: typeof withStore = (path, read, busyMs) => withStore(path, (db) => read(new Proxy(db, {
+      get(target, key) {
+        if (key !== "query") return Reflect.get(target, key, target);
+        return (sql: string) => {
+          const statement = target.query(sql);
+          if (!held || !sql.includes("AS dispatched")) return statement;
+          let rows = 0;
+          return new Proxy(statement, {
+            get(inner, name) {
+              if (name !== "get") return Reflect.get(inner, name, inner);
+              return (...args: [string]) => {
+                if (++rows === 2) { held = false; throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" }); }
+                return inner.get(...args);
+              };
+            },
+          });
+        };
+      },
+    })), busyMs);
+    const state = await pagedState(s.path, s.parent, true, NOW, null, false, flaky);
+    expect(held).toBe(false);
+    expect(state?.running).toBe(2);
+    expect(state?.tasks.map((task) => task.id)).toEqual(["ses_a", "ses_b"]);
+  });
+
   it("answers the route for the session the pane runs when the answer is given", async () => {
     const s = store();
     for (let n = 0; n < SUBAGENT_PAGE + 5; n++) {
@@ -387,7 +422,7 @@ describe("the OpenCode subagent tracker", () => {
     // the list is read a page a turn, and the pane moves to another session meanwhile
     const asked = tracker.tasksOf("w1:p1");
     void tracker.refresh([pane("ses_other")]);
-    expect((await asked)?.map((task) => [task.id, task.status])).toEqual([["ses_other_child", "running"]]);
+    expect((await asked)?.tasks.map((task) => [task.id, task.status])).toEqual([["ses_other_child", "running"]]);
   });
 
   it("never takes a read of a pane begun before one it already took", () => {
@@ -435,7 +470,7 @@ describe("the OpenCode subagent tracker", () => {
       new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks", {
         omo: { sessionOf: () => null },
         claudeAgents: { sessionOf: () => claudeLive === null ? null : { path: join(root, "absent.jsonl"), live: claudeLive, startedAt: null }, ensure: async () => undefined },
-        opencodeAgents: { sessionOf: () => ({ path: s.path, session: s.parent, live }), ensure: () => false, tasksOf: async () => (await pagedState(s.path, s.parent, live))?.tasks ?? null },
+        opencodeAgents: { sessionOf: () => ({ path: s.path, session: s.parent, live }), ensure: () => false, tasksOf: async () => pagedState(s.path, s.parent, live) },
       });
     const tasks = async (response: Response | null) => ((await response!.json()) as { tasks: { id: string; status: string }[] }).tasks.map((task) => [task.id, task.status]);
     expect(await tasks(await ask(true, null))).toEqual([["ses_working", "running"]]);
@@ -450,9 +485,35 @@ describe("the OpenCode subagent tracker", () => {
         claudeAgents: { sessionOf: () => claudeNow ? { path: join(root, "absent.jsonl"), live: true, startedAt: null } : null, ensure: async () => undefined },
         opencodeAgents: {
           sessionOf: () => ({ path: s.path, session: s.parent, live: !claudeNow }), ensure: () => false,
-          tasksOf: async () => { const read = (await pagedState(s.path, s.parent, true))?.tasks ?? null; claudeNow = true; return read; },
+          tasksOf: async () => { const read = await pagedState(s.path, s.parent, true); claudeNow = true; return read; },
         },
       });
     expect(await tasks(moving)).toEqual([]);
+    // it comes to run another OpenCode session while the list is read: the list is that session's
+    s.session("ses_moved_child", now - MIN, { parent: "ses_moved" });
+    s.prompt("ses_moved_child", now - MIN);
+    let moved = false;
+    const swapped = await handleTasksRequest(
+      new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks", {
+        omo: { sessionOf: () => null },
+        claudeAgents: { sessionOf: () => null, ensure: async () => undefined },
+        opencodeAgents: {
+          sessionOf: () => ({ path: s.path, session: moved ? "ses_moved" : s.parent, live: true }), ensure: () => false,
+          tasksOf: async () => { const read = await pagedState(s.path, moved ? "ses_moved" : s.parent, true); moved = true; return read; },
+        },
+      });
+    expect(await tasks(swapped)).toEqual([["ses_moved_child", "running"]]);
+    // or OmO comes to run there: OmO's list (none in this folder), not what OpenCode left lost
+    let omoNow = false;
+    const toOmo = await handleTasksRequest(
+      new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks", {
+        omo: { sessionOf: () => omoNow ? { cwd: root, sessionId: "omo-session" } : null },
+        claudeAgents: { sessionOf: () => null, ensure: async () => undefined },
+        opencodeAgents: {
+          sessionOf: () => ({ path: s.path, session: s.parent, live: !omoNow }), ensure: () => false,
+          tasksOf: async () => { const read = await pagedState(s.path, s.parent, true); omoNow = true; return read; },
+        },
+      });
+    expect(await tasks(toOmo)).toEqual([]);
   });
 });

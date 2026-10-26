@@ -72,6 +72,8 @@ export function BackgroundTasks({ paneId, count, omo, subagents = false, plan = 
   }, [subagents, paneId, count]);
   const [tasks, setTasks] = useState<OmoTask[] | null>(null);
   const [runs, setRuns] = useState<OmoRun[]>([]);
+  // running ones that count but are not listed (an OpenCode pane lists the newest thousand)
+  const [moreRunning, setMoreRunning] = useState(0);
   const [failed, setFailed] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   /** the PC's clock minus this browser's: task times are on the PC's */
@@ -96,7 +98,7 @@ export function BackgroundTasks({ paneId, count, omo, subagents = false, plan = 
         const next = await fetchPaneOmoActivity(paneId);
         if (!alive) return;
         const received = Date.now();
-        setTasks(next.tasks); setRuns(next.runs); setFailed(false); setOffset(clockOffsetMs(next.serverTime, received)); setNow(received);
+        setTasks(next.tasks); setRuns(next.runs); setMoreRunning(next.moreRunning); setFailed(false); setOffset(clockOffsetMs(next.serverTime, received)); setNow(received);
       } catch {
         // the clock stops with the list: a running task's time is no longer known to run on
         if (alive) setFailed(true);
@@ -293,6 +295,7 @@ export function BackgroundTasks({ paneId, count, omo, subagents = false, plan = 
       {tasks !== null && !failed && count === 0 && running.length === 0 && goingRuns.length === 0 && summary.ended > 0 && <p className="bg-tasks-note">{t("Nothing running right now")}</p>}
       {goingRuns.length > 0 && <><div className="menu-heading">{t("Workflows")}</div><ul className="bg-task-list">{goingRuns.map(runView)}</ul></>}
       {running.length > 0 && <><div className="menu-heading">{t("Running")}</div><ul className="bg-task-list">{running.map(row)}</ul></>}
+      {running.length > 0 && moreRunning > 0 && <p className="bg-tasks-note">{t("{n} more running", { n: moreRunning })}</p>}
       {summary.ended > 0 && <>
         <button type="button" className="bg-ended-toggle" aria-expanded={showEnded} aria-controls={endedId} onClick={() => setShowEnded(!showEnded)}>
           {showEnded ? <ChevronDown aria-hidden="true" /> : <ChevronRight aria-hidden="true" />}

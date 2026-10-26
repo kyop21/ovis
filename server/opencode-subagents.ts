@@ -56,9 +56,11 @@ export interface OpencodeSubagentState {
   turnRunning: number;
   /** when the person last gave the parent session a prompt: that turn began there */
   promptAt: number | null;
+  /** of those running, how many are not listed (the newest RUNNING_LIMIT are) */
+  unlisted: number;
 }
 
-const NOTHING: OpencodeSubagentState = { tasks: [], running: 0, turnRunning: 0, promptAt: null };
+const NOTHING: OpencodeSubagentState = { tasks: [], running: 0, turnRunning: 0, promptAt: null, unlisted: 0 };
 
 /** A child's newest run row, as much of it as tells how the run went. */
 interface ChildRun {
@@ -217,7 +219,7 @@ function rereadPage(db: Database, scan: Scan, columns: Set<string>): void {
   scan.reread += SUBAGENT_PAGE;
   if (scan.reread < scan.ids.length) return;
   scan.shown = [...[...scan.going].sort((a, b) => a.created - b.created).map((run) => ({ run, at: null as number | null, end: null })), ...scan.stopped];
-  scan.state = { tasks: [], running: scan.running, turnRunning: scan.turnRunning, promptAt: scan.promptAt };
+  scan.state = { tasks: [], running: scan.running, turnRunning: scan.turnRunning, promptAt: scan.promptAt, unlisted: scan.running - scan.going.length };
   scan.finished = !scan.detail;
 }
 
@@ -278,15 +280,15 @@ export function opencodeSubagentState(path: string, sessionId: string, live: boo
  * opencodeSubagentState a step at a time, the event loop let go between steps; null when it cannot be read now. Only
  * the first step waits on a store its writer holds; a later one that finds it so is tried again on the next turn.
  */
-export async function pagedState(path: string, sessionId: string, live: boolean, now = Date.now(), serviceStart: number | null = null, detail = true): Promise<OpencodeSubagentState | null> {
+export async function pagedState(path: string, sessionId: string, live: boolean, now = Date.now(), serviceStart: number | null = null, detail = true, open: typeof withStore = withStore): Promise<OpencodeSubagentState | null> {
   const scan = newScan(sessionId, now, live, serviceStart, detail);
   try {
-    if (withStore(path, (db) => { scanStep(db, scan); return true; }) === null) return null;
+    if (open(path, (db) => { scanStep(db, scan); return true; }) === null) return null;
   } catch { return null; }
   for (let failed = 0; !scan.finished;) {
     await nextTurn();
     try {
-      if (withStore(path, (db) => { scanStep(db, scan); return true; }, 0) === null) return null;
+      if (open(path, (db) => { scanStep(db, scan); return true; }, 0) === null) return null;
       failed = 0;
     } catch { if (++failed >= STEP_TRIES) return null; }
   }
@@ -359,13 +361,13 @@ export class OpencodeSubagentStatus {
    * event loop go: a pane that comes to run another session (or stops running it) meanwhile is read again for that, so
    * that the answer is the pane's own as it stands when it is given.
    */
-  async tasksOf(paneId: string): Promise<OmoTask[] | null> {
+  async tasksOf(paneId: string): Promise<Pick<OpencodeSubagentState, "tasks" | "unlisted"> | null> {
     for (let tries = 0; tries < 3; tries++) {
       const known = this.sessionOf(paneId);
-      if (known === null) return [];
+      if (known === null) return { tasks: [], unlisted: 0 };
       const state = await pagedState(known.path, known.session, known.live, this.now(), this.deps.serviceStart?.() ?? null);
       const current = this.sessionOf(paneId);
-      if (current?.path === known.path && current.session === known.session && current.live === known.live) return state?.tasks ?? null;
+      if (current?.path === known.path && current.session === known.session && current.live === known.live) return state;
     }
     return null;
   }

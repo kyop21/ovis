@@ -836,10 +836,10 @@ export async function fetchAgentCommands(agent: string, cwd: string | null, mach
 }
 
 /** GET /api/pane/omo-tasks: the background tasks and workflows the pane's OmO session started, and that PC's clock. */
-export async function fetchPaneOmoActivity(paneId: string, machineId = "local"): Promise<{ tasks: OmoActivity["tasks"]; runs: OmoActivity["runs"]; serverTime: string | null }> {
+export async function fetchPaneOmoActivity(paneId: string, machineId = "local"): Promise<{ tasks: OmoActivity["tasks"]; runs: OmoActivity["runs"]; serverTime: string | null; moreRunning: number }> {
   const activity = await getJson<Partial<OmoActivity>>(machinePath(machineId, `pane/omo-tasks?pane_id=${encodeURIComponent(paneId)}`));
-  // a bridge from before workflows answers tasks only
-  return { tasks: activity.tasks ?? [], runs: activity.runs ?? [], serverTime: activity.server_time ?? null };
+  // a bridge from before workflows answers tasks only; one from before the running list was cut, every running one
+  return { tasks: activity.tasks ?? [], runs: activity.runs ?? [], serverTime: activity.server_time ?? null, moreRunning: typeof activity.more_running === "number" && activity.more_running > 0 ? activity.more_running : 0 };
 }
 
 /**

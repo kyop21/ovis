@@ -150,6 +150,7 @@ export const CHAT_KO: Record<string, string> = {
   "No background tasks to show yet": "아직 보여줄 백그라운드 작업이 없습니다",
   "Running": "실행 중",
   "{n} recently ended": "최근 끝난 작업 {n}개",
+  "{n} more running": "그 밖에 {n}개 실행 중",
   "Nothing running right now": "지금 실행 중인 작업이 없습니다",
   "{done} of {total} done": "{total}개 중 {done}개 완료",
   "{n} running": "{n}개 실행 중",

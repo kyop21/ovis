@@ -150,6 +150,7 @@ export const CHAT_ZH: Record<string, string> = {
   "No background tasks to show yet": "暂时没有可显示的后台任务",
   "Running": "运行中",
   "{n} recently ended": "最近结束 {n} 个",
+  "{n} more running": "另有 {n} 个正在运行",
   "Nothing running right now": "当前没有正在运行的任务",
   "{done} of {total} done": "已完成 {done}/{total}",
   "{n} running": "{n} 个运行中",

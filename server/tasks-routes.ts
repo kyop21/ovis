@@ -24,35 +24,39 @@ export async function handleTasksRequest(request: Request, url: URL, pathname: s
     if (request.method !== "GET") return badRequest("method_not_allowed", "use GET");
     const paneId = url.searchParams.get("pane_id");
     if (!paneId) return badRequest("missing_pane_id", "pane_id query parameter is required");
-    const session = omo.sessionOf(paneId);
     // server_time: the browser's clock can differ from this PC's, and the list says how long tasks ran
     const server_time = new Date().toISOString();
-    if (session === null) {
-      // a Claude pane's subagents, read from its session's files; nothing for any other pane.
-      // Its transcript is found here if the background lookup has not got to it yet
-      // (for a second at most: a slow herdr answers with what is known, and the next ask has the rest)
-      // An unknown pane costs a fresh herdr lookup too; the client bounds its discovery retries.
-      if (claudeAgents.sessionOf(paneId) === null && opencodeAgents.sessionOf(paneId) === null) {
-        await within(1000, (async () => {
-          const pane = await paneGet(paneId);
-          opencodeAgents.ensure(pane);
-          await claudeAgents.ensure(pane);
-        })());
-      }
-      // an OpenCode pane's subagents are its child sessions; of a pane that ran both, the one it runs now
-      const opencodeRuns = (): boolean => {
-        const opencode = opencodeAgents.sessionOf(paneId);
-        return opencode !== null && (opencode.live || claudeAgents.sessionOf(paneId)?.live !== true);
-      };
-      if (opencodeRuns()) {
-        const tasks = await opencodeAgents.tasksOf(paneId);
-        // read while the event loop went on: a pane that runs Claude Code now is answered with Claude's
-        if (opencodeRuns()) return jsonResponse({ tasks: tasks ?? [], runs: [], server_time });
-      }
-      const claude = claudeAgents.sessionOf(paneId);
-      return jsonResponse({ tasks: claude === null ? [] : claudeSubagents(claude.path, claude.live, Date.now(), claude.startedAt), runs: [], server_time });
+    // a Claude pane's subagents, read from its session's files; nothing for any other pane.
+    // Its transcript is found here if the background lookup has not got to it yet
+    // (for a second at most: a slow herdr answers with what is known, and the next ask has the rest)
+    // An unknown pane costs a fresh herdr lookup too; the client bounds its discovery retries.
+    if (omo.sessionOf(paneId) === null && claudeAgents.sessionOf(paneId) === null && opencodeAgents.sessionOf(paneId) === null) {
+      await within(1000, (async () => {
+        const pane = await paneGet(paneId);
+        opencodeAgents.ensure(pane);
+        await claudeAgents.ensure(pane);
+      })());
     }
-    return jsonResponse({ tasks: omoTasks(session.cwd, session.sessionId, processAlive), runs: omoRuns(session.cwd, session.sessionId), server_time });
+    // An OpenCode pane's list is read while the event loop goes on, and the pane may come to run another session,
+    // OmO or Claude Code meanwhile: what it runs is told again after the read, and a list is given only for that
+    for (let tries = 0; tries < 3; tries++) {
+      const session = omo.sessionOf(paneId);
+      if (session !== null) return jsonResponse({ tasks: omoTasks(session.cwd, session.sessionId, processAlive), runs: omoRuns(session.cwd, session.sessionId), server_time });
+      // an OpenCode pane's subagents are its child sessions; of a pane that ran both, the one it runs now
+      const opencode = opencodeAgents.sessionOf(paneId);
+      if (opencode === null || (!opencode.live && claudeAgents.sessionOf(paneId)?.live === true)) {
+        const claude = claudeAgents.sessionOf(paneId);
+        return jsonResponse({ tasks: claude === null ? [] : claudeSubagents(claude.path, claude.live, Date.now(), claude.startedAt), runs: [], server_time });
+      }
+      const read = await opencodeAgents.tasksOf(paneId);
+      const current = opencodeAgents.sessionOf(paneId);
+      const same = current !== null && current.path === opencode.path && current.session === opencode.session && current.live === opencode.live;
+      if (same && omo.sessionOf(paneId) === null && (current.live || claudeAgents.sessionOf(paneId)?.live !== true)) {
+        return jsonResponse({ tasks: read?.tasks ?? [], runs: [], server_time, ...(read !== null && read.unlisted > 0 ? { more_running: read.unlisted } : {}) });
+      }
+    }
+    // a pane that kept moving: nothing is told for sure; the client asks again
+    return jsonResponse({ tasks: [], runs: [], server_time });
   }
   return null;
 }
