@@ -787,7 +787,10 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   wait, the oldest giving way, until read; on a phone the two controls sit together on a row
   under the sentence. The device that paired never sees it, not even a browser that paired itself
   with its window already open, in any tab, nor is it pushed to that browser (its stream keys,
-  shared/protocol.ts "Browser stream keys"); nor does anyone see a pairing whose write failed. A layout
+  shared/protocol.ts "Browser stream keys"); nor does anyone see a pairing whose write failed. The
+  line follows this app's own update and LAN-exposure notice lines, which it sits beside, so a new
+  device reads as one more thing to look at; the Codex and Claude apps have no verified device
+  alert to follow. A layout
   call the palette made that a PC's bridge from before the route answered 404 to reads there too,
   for a moment, as a `.pane-notice` line of `--status-blocked` `--fs-xs` text under a hairline
   ("This PC's bridge does not offer this yet"); the tab's menu says the same at the strip's end. With the
