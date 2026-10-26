@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SshConnection } from "./ssh.ts";
+import { SshConnection, sshClient } from "./ssh.ts";
 
 // The direct mode Windows uses (its OpenSSH has no connection sharing), run here against a
 // stand-in ssh. Windows itself runs it against real hosts; this sh stand-in needs a POSIX shell.
@@ -74,7 +74,7 @@ describe.skipIf(process.platform === "win32")("SSH without connection sharing", 
   const cleanups: (() => void)[] = [];
   afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
 
-  function fixture(env: Record<string, string> = {}) {
+  function fixture(env: Record<string, string> = {}, { onPath = true } = {}) {
     const root = mkdtempSync(join(tmpdir(), "herdr-ssh-direct-"));
     const bin = join(root, "bin");
     mkdirSync(bin);
@@ -82,8 +82,9 @@ describe.skipIf(process.platform === "win32")("SSH without connection sharing", 
     chmodSync(join(bin, "ssh"), 0o755);
     writeFileSync(join(bin, "ssh-keygen"), FAKE_SSH_KEYGEN);
     chmodSync(join(bin, "ssh-keygen"), 0o755);
-    const saved = Object.fromEntries(["PATH", ...FAKE_KEYS].map((key) => [key, process.env[key]]));
-    process.env["PATH"] = `${bin}:${saved["PATH"]}`;
+    const saved = Object.fromEntries(["PATH", "OVIS_SSH", ...FAKE_KEYS].map((key) => [key, process.env[key]]));
+    if (onPath) process.env["PATH"] = `${bin}:${saved["PATH"]}`;
+    else process.env["OVIS_SSH"] = join(bin, "ssh");
     Object.assign(process.env, { FAKE_DIR: root, FAKE_BUN: process.execPath }, env);
     const state = join(root, "state");
     const ssh = new SshConnection({ destination: "pc" }, state, undefined, false, false);
@@ -108,6 +109,13 @@ describe.skipIf(process.platform === "win32")("SSH without connection sharing", 
     expect(run).toContain("BatchMode=yes");
     expect(run).toContain("StrictHostKeyChecking=yes");
     expect(ssh.connected()).toBe(true);
+  });
+
+  it("runs the ssh OVIS_SSH names instead of the one on PATH", async () => {
+    const { ssh, calls, ask } = fixture({}, { onPath: false });
+    await ssh.start(ask("unused"));
+    expect(await ssh.run("true")).toBe("ran\n");
+    expect(calls().some((line) => line.endsWith("sh -c 'true'"))).toBe(true);
   });
 
   it("asks for a passphrase once and answers it to the commands after connecting", async () => {
@@ -202,5 +210,34 @@ describe.skipIf(process.platform === "win32")("SSH without connection sharing", 
       await ssh.start(ask("unused"));
       await expect(ssh.forward(40_000, 7317)).rejects.toThrow("LocalForward, RemoteForward or DynamicForward");
     });
+  });
+});
+
+describe("which OpenSSH runs", () => {
+  const git = String.raw`C:\Program Files\Git\usr\bin`;
+  const gitClient = { ssh: String.raw`${git}\ssh.exe`, sftp: String.raw`${git}\sftp.exe`, keygen: String.raw`${git}\ssh-keygen.exe` };
+  const only = (...paths: string[]) => (path: string) => paths.includes(path);
+  const plain = { ssh: "ssh", sftp: "sftp", keygen: "ssh-keygen" };
+
+  it("is Git for Windows' on Windows, whose ssh exits after a command that printed something", () => {
+    const which = () => String.raw`C:\Program Files\Git\cmd\git.exe`;
+    expect(sshClient({ platform: "win32", env: {}, which, exists: only(...Object.values(gitClient)) })).toEqual(gitClient);
+  });
+
+  it("finds Git in its install folder when git is not on PATH", () => {
+    const env = { ProgramFiles: String.raw`C:\Program Files` };
+    expect(sshClient({ platform: "win32", env, which: () => null, exists: only(...Object.values(gitClient)) })).toEqual(gitClient);
+  });
+
+  it("is the one OVIS_SSH names, with the sftp and ssh-keygen beside it where they exist", () => {
+    const env = { OVIS_SSH: String.raw`D:\OpenSSH\ssh.exe` };
+    const exists = only(...Object.values(gitClient), String.raw`D:\OpenSSH\sftp.exe`);
+    expect(sshClient({ platform: "win32", env, which: () => String.raw`C:\Program Files\Git\cmd\git.exe`, exists }))
+      .toEqual({ ssh: String.raw`D:\OpenSSH\ssh.exe`, sftp: String.raw`D:\OpenSSH\sftp.exe`, keygen: "ssh-keygen" });
+  });
+
+  it("stays the one on PATH without Git, and on other systems", () => {
+    expect(sshClient({ platform: "win32", env: {}, which: () => null, exists: () => false })).toEqual(plain);
+    expect(sshClient({ platform: "linux", env: {}, which: () => "/usr/bin/git", exists: () => true })).toEqual(plain);
   });
 });
