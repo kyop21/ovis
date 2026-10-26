@@ -347,7 +347,7 @@ const processInfo = async (paneId: string): Promise<ProcessInfo> => {
 
 /**
  * When each foreground process of `infos` started, read before the checks that compare it, without holding the
- * event loop: on macOS each read runs `ps` (processStartedAtAsync), a few at a time. Every OmO status refresh, and
+ * event loop: on macOS each read is the kernel's process record (processStartedAtAsync), a few at a time. Every OmO status refresh, and
  * so every snapshot a pending message is checked against, reads these (#1545).
  */
 async function processStarts(infos: Iterable<ProcessInfo>): Promise<(pid: number) => number | null> {

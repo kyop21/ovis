@@ -518,7 +518,9 @@ it("reads OmO panes' process starts from the kernel on macOS, with no ps child",
   const kernel = spyOn(darwinProcess, "darwinStartTime").mockReturnValue(1_000_000n);
   const awaited = spyOn(Bun, "spawn");
   try {
-    expect((await omoPanes([pane], home)).has(pane.pane_id)).toBe(true);
+    // the kernel's start reaches the pane's OmO result: a read that skipped the kernel would leave it unknown
+    expect((await omoPanes([pane], home)).get(pane.pane_id)?.startedAt).toBe(1_000);
+    expect(kernel).toHaveBeenCalledWith(4242);
     expect(awaited).not.toHaveBeenCalled();
     expect(blocking).not.toHaveBeenCalled();
   } finally {
