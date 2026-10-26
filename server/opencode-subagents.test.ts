@@ -179,14 +179,16 @@ describe("an OpenCode session's subagents are its child sessions", () => {
     const s = store();
     s.session("ses_early", NOW - 50 * MIN);
     s.prompt("ses_early", NOW - 50 * MIN);
-    for (let n = 0; n < 70; n++) {
+    // more than are read for the list (MAX_CHILDREN)
+    const ended = 1030;
+    for (let n = 0; n < ended; n++) {
       s.session(`ses_done${n}`, NOW - 40 * MIN + n * 1000);
       s.prompt(`ses_done${n}`, NOW - 40 * MIN + n * 1000);
       s.idle(`ses_done${n}`, NOW - 30 * MIN + n * 1000);
     }
     const state = opencodeSubagentState(s.path, s.parent, true, NOW, null, false)!;
     expect(state.running).toBe(1);
-    expect(state.tasks.map((task) => task.id)).toEqual(["ses_early", ...Array.from({ length: 10 }, (_, n) => `ses_done${69 - n}`)]);
+    expect(state.tasks.map((task) => task.id)).toEqual(["ses_early", ...Array.from({ length: 10 }, (_, n) => `ses_done${ended - 1 - n}`)]);
   });
 
   it("reads every other child when one's newest row is not JSON", () => {
@@ -268,8 +270,8 @@ describe("the OpenCode subagent tracker", () => {
 
   it("drops another agent's wait when a pane first runs a session after it, never what the pane's own OpenCode turn was seen do", () => {
     const s = store();
-    const resets: string[] = [];
-    const tracker = new OpencodeSubagentStatus({ store: () => s.path, now: () => NOW, onChange: () => undefined, onReset: (paneId) => resets.push(paneId) });
+    const resets: [string, boolean][] = [];
+    const tracker = new OpencodeSubagentStatus({ store: () => s.path, now: () => NOW, onChange: () => undefined, onReset: (paneId, first) => resets.push([paneId, first]) });
     // a shell, then OpenCode's home screen, then its session found after the turn: one OpenCode lifetime
     tracker.refresh([{ pane_id: "w1:p1", agent: null, agent_status: "idle" } as HerdrPane]);
     tracker.refresh([pane(null)]);
@@ -278,7 +280,10 @@ describe("the OpenCode subagent tracker", () => {
     // a pane Claude Code ran until this snapshot
     tracker.refresh([{ ...pane(null, "claude"), pane_id: "w1:p2" }]);
     tracker.refresh([{ ...pane(s.parent), pane_id: "w1:p2" }]);
-    expect(resets).toEqual(["w1:p2"]);
+    expect(resets).toEqual([["w1:p2", true]]);
+    // another session there: a new lifetime of OpenCode's own
+    tracker.refresh([{ ...pane("ses_next"), pane_id: "w1:p2" }]);
+    expect(resets).toEqual([["w1:p2", true], ["w1:p2", false]]);
   });
 
   it("keeps the count while the store cannot be read", () => {

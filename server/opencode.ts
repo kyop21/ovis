@@ -305,16 +305,17 @@ export function forgetOpencodeRead(key: string): void {
 }
 
 /** The store, read-only; null when it cannot be opened (no file, not SQLite, not readable). */
-function openStore(path: string): Database | null {
+function openStore(path: string, busyMs: number): Database | null {
   try {
     const db = new Database(path, { readonly: true, create: false });
-    db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    db.exec(`PRAGMA busy_timeout = ${busyMs}`);
     return db;
   } catch { return null; }
 }
 
-export function withStore<T>(path: string, read: (db: Database) => T): T | null {
-  const db = openStore(path);
+/** `busyMs`: how long a read waits on a store held by its writer; a poll that runs on the event loop waits not at all. */
+export function withStore<T>(path: string, read: (db: Database) => T, busyMs = BUSY_TIMEOUT_MS): T | null {
+  const db = openStore(path, busyMs);
   if (db === null) return null;
   try { return read(db); }
   finally { db.close(); }

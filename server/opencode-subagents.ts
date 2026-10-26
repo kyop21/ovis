@@ -29,7 +29,10 @@ import { opencodeSessionId, withStore } from "./opencode.ts";
 /** As for Claude Code and OmO: the newest ten that ended in the last day are listed. */
 const RECENT_MS = 24 * 60 * 60_000;
 const RECENT_LIMIT = 10;
-/** A session's children are read up to this many, newest first: a session that started more is still read in bounded time. */
+/**
+ * A session's ended children are read up to this many, newest first, for the list: a session that started more is still
+ * read in bounded time. One whose run has not ended is read however many newer ones did: it counts.
+ */
 const MAX_CHILDREN = 1024;
 /** A run written this long before the service's start may still be the service's own (its start is read in whole ticks). */
 const START_SLACK_MS = 5_000;
@@ -102,16 +105,18 @@ export function readSubagents(db: Database, sessionId: string, live: boolean, no
   const columns = new Set(db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('session_v2')").all().map((column) => column.name));
   // 1.x tables, or a 2.0 store from before child sessions: no subagents to tell of
   if (!columns.has("parent_id")) return NOTHING;
-  // every child's newest run row, in one read, without the row's whole data (a step can be large)
-  const runs = db.query<ChildRun, [string]>(`
+  // every child's newest run row, without the row's whole data (a step can be large): each one whose run has not ended
+  // with an idle row, to be classified here, then the newest ended ones, for the list
+  const read = (only: string, limit: string): ChildRun[] => db.query<ChildRun, [string]>(`
     SELECT s.id, s.time_created AS created, m.type, m.time_created AS at,
       ${["outcome:$.outcome", "created_at:$.time.created", "completed:$.time.completed", "finish:$.finish", "error_type:$.error.type"]
     .map((field) => field.split(":")).map(([name, path]) => `CASE WHEN json_valid(m.data) THEN json_extract(m.data, '${path}') END AS ${name}`).join(", ")},
       CASE WHEN json_valid(m.data) THEN json_type(m.data, '$.error') END AS error
     FROM session_v2 AS s JOIN session_message AS m ON m.id = (
       SELECT id FROM session_message WHERE session_id = s.id AND type IN ${RUN_ROWS} ORDER BY seq DESC LIMIT 1)
-    WHERE s.parent_id = ?${columns.has("time_archived") ? " AND s.time_archived IS NULL" : ""}
-    ORDER BY s.time_created DESC LIMIT ${MAX_CHILDREN}`).all(sessionId);
+    WHERE s.parent_id = ?${columns.has("time_archived") ? " AND s.time_archived IS NULL" : ""}${only}
+    ORDER BY s.time_created DESC${limit}`).all(sessionId);
+  const runs = [...read(" AND m.type != 'idle'", ""), ...read(" AND m.type = 'idle'", ` LIMIT ${MAX_CHILDREN}`)];
   const prompt = db.query<{ data: string; time_created: number }, [string]>(
     "SELECT data, time_created FROM session_message WHERE session_id = ? AND type = 'user' ORDER BY seq DESC LIMIT 1",
   ).get(sessionId);
@@ -164,10 +169,14 @@ export function opencodeSubagentState(path: string, sessionId: string, live: boo
 export interface OpencodeSubagentDeps {
   /** OpenCode's store: the one this server is configured with, else where OpenCode keeps it */
   store: () => string | null;
-  /** when OpenCode's background service started, when it can be told */
+  /** when OpenCode's background service started, when it can be told now: read on every poll, so never waited for */
   serviceStart?: () => number | null;
-  /** The pane runs a session from now (another one, one it came back to, or its first after another agent): no earlier turn's wait is its own. */
-  onReset?: (paneId: string) => void;
+  /**
+   * The pane runs a session from now: another one, or one it came back to (`first` false: no earlier turn's wait is its
+   * own), or its first after another agent (`first`: what the other agent's turns left is not its own; what OpenCode was
+   * seen do there since, before its session was found, is).
+   */
+  onReset?: (paneId: string, first: boolean) => void;
   /** A pane's running subagents changed, or how many of them its turn started: no turn started or ended. */
   onChange: (paneId: string, running: number, turnRunning: number, promptAt: number | null) => void;
   pollMs?: number;
@@ -246,13 +255,14 @@ export class OpencodeSubagentStatus {
     if (tracked?.session === session) {
       if (tracked.live) return false;
       tracked.live = true;
-      this.deps.onReset?.(pane.pane_id);
+      this.deps.onReset?.(pane.pane_id, false);
       return true;
     }
     // another session than the one it ran, or the first after another agent's: a new lifetime. The first
     // session of a pane seen new, at a shell or at OpenCode's home screen is found after its turn began,
     // maybe after it ended: what that turn was seen do is this session's
-    if (tracked !== undefined || (before != null && before !== "opencode")) this.deps.onReset?.(pane.pane_id);
+    if (tracked !== undefined) this.deps.onReset?.(pane.pane_id, false);
+    else if (before != null && before !== "opencode") this.deps.onReset?.(pane.pane_id, true);
     this.panes.set(pane.pane_id, { session, live: true, running: tracked?.running ?? 0, turnRunning: tracked?.turnRunning ?? 0, promptAt: tracked?.promptAt ?? null, reset: tracked !== undefined });
     return true;
   }
@@ -267,9 +277,10 @@ export class OpencodeSubagentStatus {
       const serviceStart = this.deps.serviceStart?.() ?? null;
       // one read for all: a store held by its writer is waited on once, not once per pane
       try {
+        // on the event loop: a store its writer holds is not waited for
         withStore(path, (db) => {
           for (const [paneId, tracked] of live) states.set(paneId, readSubagents(db, tracked.session, true, this.now(), serviceStart, false));
-        });
+        }, 0);
       } catch { /* a store busy for a moment says nothing: the counts stand */ }
     }
     for (const [paneId, tracked] of this.panes) {
