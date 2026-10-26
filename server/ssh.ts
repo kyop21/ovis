@@ -47,7 +47,9 @@ export function sshClient({ env = process.env, platform = process.platform, exis
   const roots: string[] = [];
   const git = which("git");
   for (let dir = git ? win32.dirname(git) : "", up = 0; dir && up < 3; dir = win32.dirname(dir), up++) roots.push(dir);
-  for (const base of [env["ProgramFiles"], env["LOCALAPPDATA"] && win32.join(env["LOCALAPPDATA"], "Programs")]) if (base) roots.push(win32.join(base, "Git"));
+  for (const base of [env["ProgramFiles"], env["ProgramFiles(x86)"], env["LOCALAPPDATA"] && win32.join(env["LOCALAPPDATA"], "Programs")]) if (base) roots.push(win32.join(base, "Git"));
+  // Scoop puts a shim on PATH, not git.exe itself
+  if (env["USERPROFILE"]) roots.push(win32.join(env["SCOOP"] || win32.join(env["USERPROFILE"], "scoop"), "apps", "git", "current"));
   for (const root of roots) {
     const ssh = win32.join(root, "usr", "bin", "ssh.exe");
     if (exists(ssh)) return beside(ssh);
@@ -106,7 +108,8 @@ export function decodeClixml(stderr: string): string {
  * Multiplexed (Linux, macOS): one OpenSSH master; every command, upload and forward goes over
  * its control socket, so a password typed once serves them all.
  *
- * Direct (Windows, whose OpenSSH has no connection sharing: `getsockname failed: Not a socket`):
+ * Direct (Windows, whichever ssh runs; Windows' own OpenSSH has no connection sharing:
+ * `getsockname failed: Not a socket`):
  * every command is its own ssh process, a long-lived `ssh -N` stands in for the master, and each
  * forward is its own `ssh -N -L`. An ssh-agent signs for all of them (Git for Windows' ssh reads
  * `SSH_AUTH_SOCK`, not Windows' agent service); a password or passphrase the
@@ -154,7 +157,7 @@ export class SshConnection {
     const args = ["-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "PermitLocalCommand=no", "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"];
     if (clearForwardings) args.unshift("-o", "ClearAllForwardings=yes");
     if (this.keyOnly) args.push("-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none");
-    // the account's own `ControlMaster auto` would make Windows' ssh fail every connection
+    // the account's own `ControlMaster auto` would make every connection fail on Windows
     if (!this.multiplexed) args.push("-o", "ControlMaster=no", "-o", "ControlPath=none");
     if (this.target.port) args.push("-o", `Port=${this.target.port}`);
     if (this.target.identity_file) args.push("-i", this.target.identity_file.replace(/^~[\\/]/, homedir() + "/"));
@@ -171,7 +174,7 @@ export class SshConnection {
   /**
    * A direct-mode ssh. It always checks the host strictly; it may answer a prompt only when
    * start() kept an answer for it, and the helper then refuses any prompt it has none for.
-   * Keyboard-interactive is off: its prompt is the server's own text, and Windows' ssh hands a
+   * Keyboard-interactive is off: its prompt is the server's own text, and ssh on Windows hands a
    * prompt to the `.cmd` helper on a command line that cmd parses, quoting `"` only as `\"`, so
    * a `"` and `&` in it would run a command here before the helper sees it. Password and
    * passphrase prompts are built by ssh itself from this PC's config.

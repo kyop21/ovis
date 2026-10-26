@@ -82,6 +82,8 @@ describe.skipIf(process.platform === "win32")("SSH without connection sharing", 
     chmodSync(join(bin, "ssh"), 0o755);
     writeFileSync(join(bin, "ssh-keygen"), FAKE_SSH_KEYGEN);
     chmodSync(join(bin, "ssh-keygen"), 0o755);
+    writeFileSync(join(bin, "sftp"), `#!/bin/sh\nprintf 'sftp %s\\n' "$*" >> "$FAKE_DIR/calls"\ncat > /dev/null\n`);
+    chmodSync(join(bin, "sftp"), 0o755);
     const saved = Object.fromEntries(["PATH", "OVIS_SSH", ...FAKE_KEYS].map((key) => [key, process.env[key]]));
     if (onPath) process.env["PATH"] = `${bin}:${saved["PATH"]}`;
     else process.env["OVIS_SSH"] = join(bin, "ssh");
@@ -112,10 +114,13 @@ describe.skipIf(process.platform === "win32")("SSH without connection sharing", 
   });
 
   it("runs the ssh OVIS_SSH names instead of the one on PATH", async () => {
-    const { ssh, calls, ask } = fixture({}, { onPath: false });
+    const { root, ssh, calls, ask } = fixture({}, { onPath: false });
     await ssh.start(ask("unused"));
     expect(await ssh.run("true")).toBe("ran\n");
     expect(calls().some((line) => line.endsWith("sh -c 'true'"))).toBe(true);
+    // the sftp beside it, told to start that ssh rather than its own build's
+    await ssh.upload(join(root, "calls"), String.raw`C:\Users\pc\bundle`);
+    expect(calls().some((line) => line.startsWith(`sftp -S ${join(root, "bin", "ssh")} `))).toBe(true);
   });
 
   it("asks for a passphrase once and answers it to the commands after connecting", async () => {
@@ -234,6 +239,13 @@ describe("which OpenSSH runs", () => {
     const exists = only(...Object.values(gitClient), String.raw`D:\OpenSSH\sftp.exe`);
     expect(sshClient({ platform: "win32", env, which: () => String.raw`C:\Program Files\Git\cmd\git.exe`, exists }))
       .toEqual({ ssh: String.raw`D:\OpenSSH\ssh.exe`, sftp: String.raw`D:\OpenSSH\sftp.exe`, keygen: "ssh-keygen" });
+  });
+
+  it("finds a Scoop Git, whose git on PATH is a shim", () => {
+    const env = { USERPROFILE: String.raw`C:\Users\pc` };
+    const scoop = String.raw`C:\Users\pc\scoop\apps\git\current\usr\bin`;
+    const client = { ssh: String.raw`${scoop}\ssh.exe`, sftp: String.raw`${scoop}\sftp.exe`, keygen: String.raw`${scoop}\ssh-keygen.exe` };
+    expect(sshClient({ platform: "win32", env, which: () => String.raw`C:\Users\pc\scoop\shims\git.exe`, exists: only(...Object.values(client)) })).toEqual(client);
   });
 
   it("stays the one on PATH without Git, and on other systems", () => {
