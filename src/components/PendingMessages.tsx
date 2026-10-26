@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { ArrowUp, Copy, X } from "lucide-react";
 import type { PendingMessageView } from "../lib/pendingMessages.ts";
 import { copyText } from "../lib/clipboard.ts";
-import { openCodeAgentChange, submitNote } from "../lib/compose.ts";
+import { openCodeRefusalNote, submitNote } from "../lib/compose.ts";
 import { useT, type Vars } from "../lib/i18n.ts";
 import "./PendingMessages.css";
 
@@ -33,9 +33,8 @@ export function pendingStatus(message: Pick<PendingMessageView, "state" | "error
   if (message.error?.code === "transcript_unconfirmed" || message.error?.code === "pi_transcript_target_changed") return t("Sent to Pi · transcript confirmation unavailable");
   if (message.state === "held" && !message.error && message.serverOwned) return t("Waits for Send now");
   if (message.state === "uncertain") {
-    const changed = message.error?.code === "submit_changed" ? openCodeAgentChange(message.error.message) : null;
-    return changed ? t("Tab switched OpenCode's agent from {from} to {to}. Nothing more was typed. Check the terminal before sending again.", changed)
-      : t("Not confirmed. Check the terminal before sending again.");
+    return (message.error ? openCodeRefusalNote(message.error.code, message.error.message, t) : null)
+      ?? t("Not confirmed. Check the terminal before sending again.");
   }
   return t("Held message — review and send");
 }
