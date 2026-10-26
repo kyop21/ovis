@@ -853,3 +853,46 @@ it("returns an error when revocation cannot be persisted, then allows a successf
     expect(new DeviceStore(root).match(paired.token)).toBeNull();
   } finally { server.stop(); rmSync(root, { recursive: true, force: true }); }
 });
+
+it("never announces a pairing to a stream that came in through the open LAN, before or after every device is revoked", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-open-stream-"));
+  const server = createServer({ port: 0, stateDir: root, token: "", tailscaleOwner: null });
+  const base = `http://127.0.0.1:${server.port}`;
+  const abort = new AbortController();
+  // a request through a proxy on this PC stands for one from another device; with nothing paired it gets in through the open LAN
+  const lan = { "x-forwarded-for": "100.64.0.9" };
+  const isPairing = (label: string) => (event: MachineEvent): event is DevicePairedEvent => event.type === "device-paired" && event.label === label;
+  const pairedLabels = (stream: { events: MachineEvent[] }) => stream.events.filter((event) => event.type === "device-paired").map((event) => (event as DevicePairedEvent).label);
+  const pair = async (label: string) => {
+    const { code } = await (await fetch(`${base}/api/devices/pair/start`, { method: "POST", headers: guard })).json() as { code: string };
+    const response = await fetch(`${base}/api/devices/pair`, { method: "POST", headers: { ...guard, ...lan }, body: JSON.stringify({ code, label }) });
+    expect(response.status).toBe(204);
+    const cookie = response.headers.getSetCookie().find((line) => line.startsWith(`${DEVICE_COOKIE}=`))!.split(";")[0]!;
+    // its first return confirms a first-pair credential (and closes the gate); a gated pairing is in already
+    expect((await fetch(`${base}/api/session`, { headers: { ...lan, cookie } })).status).toBe(200);
+  };
+  try {
+    const open = await openEvents(base, lan, abort.signal);
+    const local = await openEvents(base, {}, abort.signal);
+    const heardFirst = local.next(isPairing("First"), "this PC hears of First");
+    await pair("First");
+    await heardFirst;
+    // the gate is closed: the LAN client is refused on any new request, while the stream it opened before is still open
+    expect((await fetch(`${base}/api/session`, { headers: lan })).status).toBe(401);
+    const revoked = await fetch(`${base}/api/devices/revoke-all`, { method: "POST", headers: guard });
+    expect(await revoked.json()).toEqual({ revoked: 1 } satisfies DevicesRevokedAll);
+    const heardSecond = local.next(isPairing("Second"), "this PC hears of Second");
+    await pair("Second");
+    await heardSecond;
+    // a stream is ordered: a change made after both pairings reaches the open stream, so had either pairing reached it, it came first
+    const barrier = open.next((event) => event.type === "preferences" && event.preferences.settings["theme"] === "light", "the open stream hears the barrier");
+    expect((await fetch(`${base}/api/preferences`, { method: "PUT", headers: guard, body: JSON.stringify({ settings: { theme: "light" } }) })).status).toBe(200);
+    await barrier;
+    expect(pairedLabels(open)).toEqual([]);
+    expect(pairedLabels(local)).toEqual(["First", "Second"]);
+  } finally {
+    abort.abort();
+    server.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

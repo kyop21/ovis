@@ -390,7 +390,10 @@ export function createServer(
           const presentedKeys = streamKeys(request);
           const issuedKey = presentedKeys.length === 0 && pathname === "/api/machines/events" ? newStreamKey() : null;
           const keys = issuedKey === null ? presentedKeys : [issuedKey];
-          const pairings = { subscribe: (listener: (event: DevicePairedEvent) => void) => devices.onPaired((event, origin) => { if (event.device_id !== deviceId && !sameBrowser(origin, keys)) listener(event); }) };
+          // a stream that came in through the open LAN is told nothing: every enrollment follows the write
+          // that closed the gate, so whoever holds it has no access left by the time there is news
+          const openAccess = access.level === "full" && access.via === "open";
+          const pairings = { subscribe: (listener: (event: DevicePairedEvent) => void) => devices.onPaired((event, origin) => { if (!openAccess && event.device_id !== deviceId && !sameBrowser(origin, keys)) listener(event); }) };
           const response = await handleMachineRequest(request, machines, deviceId ? (close) => devices.onRevoke(deviceId, close) : undefined, preferences, readOnly, herdrSidebar, seen, pairings);
           response.headers.set("cache-control", "no-store");
           if (issuedKey !== null && response.ok) response.headers.append("set-cookie", streamCookie(issuedKey, isSecureRequest(request)));
