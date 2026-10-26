@@ -1,4 +1,5 @@
 import { expect, it, spyOn } from "bun:test";
+import * as darwinProcess from "./darwin-process.ts";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -504,7 +505,7 @@ it("names the OmO process holding a session, not the bundled SDK child beside it
 });
 
 // every OmO status refresh reads these, so every snapshot a pending message is checked against does (#1545)
-it("reads OmO panes' process starts through ps children on macOS, never a synchronous ps", async () => {
+it("reads OmO panes' process starts from the kernel on macOS, with no ps child", async () => {
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   Object.defineProperty(process, "platform", { value: "darwin" });
   const home = mkdtempSync(join(tmpdir(), "omo-darwin-starts-"));
@@ -513,18 +514,17 @@ it("reads OmO panes' process starts through ps children on macOS, never a synchr
   spyOn(client, "herdrRpc").mockImplementation((async () => ({ process_info: { pane_id: pane.pane_id,
     foreground_processes: [{ pid: 4242, name: "node", argv: ["node", `${OMO_AI}/bin/omo`], cwd: home }] } })) as unknown as typeof client.herdrRpc);
   const blocking = spyOn(Bun, "spawnSync");
-  const probes: string[][] = [];
-  const awaited = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
-    probes.push(argv);
-    return { stdout: new Response("01:00\n").body, exited: Promise.resolve(0), signalCode: null, kill: () => {} };
-  }) as unknown as typeof Bun.spawn);
+  // the kernel's process record answers; no ps runs, awaited or not (#1404)
+  const kernel = spyOn(darwinProcess, "darwinStartTime").mockReturnValue(1_000_000n);
+  const awaited = spyOn(Bun, "spawn");
   try {
     expect((await omoPanes([pane], home)).has(pane.pane_id)).toBe(true);
-    expect(probes).toContainEqual(["/bin/ps", "-o", "etime=", "-p", "4242"]);
+    expect(awaited).not.toHaveBeenCalled();
     expect(blocking).not.toHaveBeenCalled();
   } finally {
     awaited.mockRestore();
     blocking.mockRestore();
+    kernel.mockRestore();
     (client.herdrRpc as unknown as { mockRestore(): void }).mockRestore();
     Object.defineProperty(process, "platform", platform);
     rmSync(home, { recursive: true, force: true });

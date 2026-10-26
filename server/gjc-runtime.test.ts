@@ -1,4 +1,5 @@
 import { expect, it, spyOn } from "bun:test";
+import * as darwinProcess from "./darwin-process.ts";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
@@ -390,33 +391,32 @@ it("cancels a running identity read when its pane ends", async () => {
 });
 
 /** macOS, where a start is read with `ps`: answered by an awaited child, and any synchronous spawn recorded */
-async function onDarwinPs<T>(elapsed: string, run: (probes: string[][], blocking: { mock: { calls: unknown[] } }) => Promise<T>): Promise<T> {
+async function onDarwinKernel<T>(startedMs: number, run: (spawned: { mock: { calls: unknown[] } }, blocking: { mock: { calls: unknown[] } }) => Promise<T>): Promise<T> {
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   Object.defineProperty(process, "platform", { value: "darwin" });
+  // the kernel's process record answers; no ps runs, awaited or not (#1404)
+  const kernel = spyOn(darwinProcess, "darwinStartTime").mockReturnValue(BigInt(startedMs) * 1000n);
   const blocking = spyOn(Bun, "spawnSync");
-  const probes: string[][] = [];
-  const awaited = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
-    probes.push(argv);
-    return { stdout: new Response(`${elapsed}\n`).body, exited: Promise.resolve(0), signalCode: null, kill: () => {} };
-  }) as unknown as typeof Bun.spawn);
-  try { return await run(probes, blocking); } finally {
-    awaited.mockRestore();
+  const spawned = spyOn(Bun, "spawn");
+  try { return await run(spawned, blocking); } finally {
+    spawned.mockRestore();
     blocking.mockRestore();
+    kernel.mockRestore();
     Object.defineProperty(process, "platform", platform);
   }
 }
 
 // GJC discovery runs this lookup for every snapshot a pending message is checked against (#1545)
-it("reads the GJC process's birth through an awaited ps on macOS, never a synchronous one", async () => {
+it("reads the GJC process's birth from the kernel on macOS, with no ps child", async () => {
   const f = nativeFixture();
   const clock = spyOn(Date, "now").mockReturnValue(61_000);
   try {
     const path = f.sessionFile("session-darwin");
     f.publish(f.record(200, "session-darwin", path));
     const { processBirth: _sync, ...options } = f.options;
-    await onDarwinPs("01:00", async (probes, blocking) => {
+    await onDarwinKernel(1_000, async (spawned, blocking) => {
       expect(await gjcTranscriptForPane("pane", f.cwd, f.home, { ...options, platform: "darwin" })).toBe(realpathSync(path));
-      expect(probes).toContainEqual(["/bin/ps", "-o", "etime=", "-p", "200"]);
+      expect(spawned.mock.calls).toHaveLength(0);
       expect(blocking.mock.calls).toHaveLength(0);
     });
   } finally { clock.mockRestore(); f.done(); }

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as darwinProcess from "./darwin-process.ts";
 import { Database } from "bun:sqlite";
 import { appendFileSync, copyFileSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -2743,7 +2744,7 @@ describe("a Codex pane that reported no session yet", () => {
 });
 
 // any client snapshot starts the Claude subagent refresh that reads this, also the one a pending message is checked against (#1545)
-it("reads a Claude pane's process start through a ps child on macOS, never a synchronous ps", async () => {
+it("reads a Claude pane's process start from the kernel on macOS, with no ps for it", async () => {
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   const home = mkdtempSync(join(tmpdir(), "claude-darwin-start-"));
   const previousHome = process.env["HOME"];
@@ -2755,23 +2756,22 @@ it("reads a Claude pane's process start through a ps child on macOS, never a syn
     ? { agent: { agent_session: { value: session } } }
     : { process_info: { foreground_processes: [{ pid: 4242, name: "claude", argv: ["claude"] }] } }) as unknown as typeof herdr.herdrRpc);
   const blocking = spyOn(Bun, "spawnSync");
-  const probes: string[][] = [];
-  const awaited = spyOn(Bun, "spawn").mockImplementation(((argv: string[]) => {
-    probes.push(argv);
-    return { stdout: new Response("01:00\n").body, exited: Promise.resolve(0), signalCode: null, kill: () => {} };
-  }) as unknown as typeof Bun.spawn);
+  // the kernel's process record answers the start; no ps asks it, awaited or not (#1404). Claude's own
+  // store may still ask an awaited ps for the process's environment on a real Mac.
+  const kernel = spyOn(darwinProcess, "darwinStartTime").mockReturnValue(1_000_000n);
+  const awaited = spyOn(Bun, "spawn");
   process.env["HOME"] = home;
   Object.defineProperty(process, "platform", { value: "darwin" });
   try {
     const found = await claudePaneSession({ pane_id: "claude-darwin", cwd } as HerdrPane);
     expect(found?.pid).toBe(4242);
-    expect(found?.startedAt).toBeNumber();
-    expect(probes).toContainEqual(["/bin/ps", "-o", "etime=", "-p", "4242"]);
+    expect(found?.startedAt).toBe(1_000);
+    expect((awaited.mock.calls as unknown as [string[]][]).filter(([argv]) => argv.includes("etime="))).toEqual([]);
     expect(blocking).not.toHaveBeenCalled();
   } finally {
     Object.defineProperty(process, "platform", platform);
     if (previousHome === undefined) delete process.env["HOME"]; else process.env["HOME"] = previousHome;
-    awaited.mockRestore(); blocking.mockRestore(); rpc.mockRestore();
+    awaited.mockRestore(); blocking.mockRestore(); kernel.mockRestore(); rpc.mockRestore();
     rmSync(home, { recursive: true, force: true });
   }
 });
