@@ -11,11 +11,11 @@ import { readHerdrProfiles, type HerdrMachineProfile } from "./herdr-profiles.ts
 import { accessSync, constants, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { HealthAuth, PendingMessage, SecuritySummary } from "../shared/protocol.ts";
+import type { DevicePairedEvent, HealthAuth, PendingMessage, SecuritySummary } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
-import { authClient, deviceCookieValue, bearerMatches, handleAuthRequest, isAuthenticated, parseCookies, presentedToken, presentedTokenHeld, recordPresentedTokenFailure, requiresAuth, unauthorizedJson } from "./auth.ts";
+import { authClient, deviceCookieValue, bearerMatches, handleAuthRequest, isAuthenticated, isSecureRequest, parseCookies, presentedToken, presentedTokenHeld, recordPresentedTokenFailure, requiresAuth, unauthorizedJson } from "./auth.ts";
 import { bindScope, cameThroughProxy, decideAccess, forwardingHeaders, isLoopbackAddress, isLoopbackBind, isServeOwnerRequest, lanExposed, observedIngress } from "./access.ts";
-import { DeviceStore, handleDeviceRequest, type DeviceMatch } from "./devices.ts";
+import { DeviceStore, handleDeviceRequest, newStreamKey, sameBrowser, streamCookie, streamKeys, type DeviceMatch } from "./devices.ts";
 import { handlePreferencesRequest, PreferenceStore } from "./preferences.ts";
 import { handleSeenRequest, SeenStore } from "./seen.ts";
 import { remoteAccess, TailnetIdentitySource } from "./tailscale.ts";
@@ -382,8 +382,18 @@ export function createServer(
           // resume on agent.start and then its store check (machine-api.ts slowMachinePath)
           bunServer.timeout(request, pathname === "/api/machines/events" ? 0 : slowMachinePath(pathname.split("/").slice(4).join("/")) ? 180 : 80);
           const deviceId = access.level === "full" ? access.device?.id : undefined;
-          const response = await handleMachineRequest(request, machines, deviceId ? (close) => devices.onRevoke(deviceId, close) : undefined, preferences, readOnly, herdrSidebar, seen);
+          // a device's enrollment is news to every stream but the new device's own: one the stream's
+          // device cookie names, or one this browser asked for itself (its stream key, server/devices.ts),
+          // which a stream opened before that device existed cannot know by its cookie. A browser
+          // without a key gets one with this stream; a key is a cookie of its own name, so tabs that
+          // open at once each add theirs and the pairing later carries all of them
+          const presentedKeys = streamKeys(request);
+          const issuedKey = presentedKeys.length === 0 && pathname === "/api/machines/events" ? newStreamKey() : null;
+          const keys = issuedKey === null ? presentedKeys : [issuedKey];
+          const pairings = { subscribe: (listener: (event: DevicePairedEvent) => void) => devices.onPaired((event, origin) => { if (event.device_id !== deviceId && !sameBrowser(origin, keys)) listener(event); }) };
+          const response = await handleMachineRequest(request, machines, deviceId ? (close) => devices.onRevoke(deviceId, close) : undefined, preferences, readOnly, herdrSidebar, seen, pairings);
           response.headers.set("cache-control", "no-store");
+          if (issuedKey !== null && response.ok) response.headers.append("set-cookie", streamCookie(issuedKey, isSecureRequest(request)));
           return response;
         }
       }
@@ -423,14 +433,15 @@ export function createServer(
       }
       if (pathname === "/api/devices" || pathname.startsWith("/api/devices/")) {
         try {
-          const response = await handleDeviceRequest(request, pathname, devices, access);
-          if (request.method === "DELETE" && response.status === 204) {
-            // The device registry is the delivery authority even if cleaning the push file fails.
-            try { push.revokeDevice(pathname.slice("/api/devices/".length)); } catch (error) { logPushError(error); }
-            // and every page media address its renders were given
-            forgetPageMedia({ device: pathname.slice("/api/devices/".length) });
-          }
-          return response;
+          // one device, or all of them: the registry names what was revoked, and the cleanup follows its ids
+          return await handleDeviceRequest(request, pathname, devices, access, (revoked) => {
+            for (const id of revoked) {
+              // The device registry is the delivery authority even if cleaning the push file fails.
+              try { push.revokeDevice(id); } catch (error) { logPushError(error); }
+              // and every page media address its renders were given
+              forgetPageMedia({ device: id });
+            }
+          });
         } catch (error) { return errorResponse(error); }
       }
 
@@ -460,7 +471,12 @@ export function createServer(
           // it stays open, like a subscription from before owners (undefined); a local/token/
           // Tailscale sign-in is the owner (null)
           const owner = access.level !== "full" ? null : access.device?.id ?? (access.via === "open" ? undefined : null);
-          const answered = await handlePushRequest(request, pathname, push, owner);
+          // the subscription remembers its browser's stream keys, so that browser's own pairing is not
+          // pushed to it whoever owns the subscription; a browser without one gets one here
+          const presentedKeys = streamKeys(request);
+          const issuedKey = presentedKeys.length === 0 && request.method === "POST" && pathname === "/api/push/subscribe" ? newStreamKey() : null;
+          const answered = await handlePushRequest(request, pathname, push, owner, issuedKey === null ? presentedKeys : [issuedKey]);
+          if (answered && issuedKey !== null && answered.ok) answered.headers.append("set-cookie", streamCookie(issuedKey, isSecureRequest(request)));
           if (answered) return answered;
         } catch (error) {
           return errorResponse(error);

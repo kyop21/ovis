@@ -67,7 +67,7 @@ export type SessionSnapshot = Omit<HerdrSnapshot, "panes"> & {
 };
 export type { WorkspaceMoved } from "./workspace-lifecycle.ts";
 
-export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupRequest, SetupAction, BridgeIdentity, BridgeHealth } from "./machines.ts";
+export type { DevicePairedEvent, Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupRequest, SetupAction, BridgeIdentity, BridgeHealth } from "./machines.ts";
 
 /** Machine API (same token gate; mutations require X-Herdr-Machine: 1 + same origin)
  * GET /api/health?scope=bridge -> BridgeHealth, never waits for herdr
@@ -320,8 +320,12 @@ export type { Machine, MachineEvent, MachineRoster, PaneTarget, SetupJob, SetupR
  *  POST   /api/devices/pair { code, label? } -> 204 + Set-Cookie ovis_device (public, like /api/auth;
  *         401 invalid_code when the code is wrong, spent after five tries, or expired)
  *  PATCH  /api/devices/:id  { label }    -> PairedDevice;  DELETE /api/devices/:id -> 204 (revoked at its next request)
+ *  POST   /api/devices/revoke-all        -> DevicesRevokedAll + Set-Cookie clearing ovis_device and its old name
+ *         (X-Herdr-Machine: 1 + same origin, a client that can drive: 403 invalid_origin / read_only;
+ *         500 internal_error when the write fails, and then nothing was revoked)
  *  GET    /api/push                      -> PushKey (the VAPID application server key)
- *  POST   /api/push/subscribe { subscription }  -> 204 (a browser PushSubscription JSON; upsert by endpoint)
+ *  POST   /api/push/subscribe { subscription }  -> 204 (a browser PushSubscription JSON; upsert by endpoint;
+ *         a browser without a stream key is issued one: "Browser stream keys" below)
  *         | 410 subscription_gone (its push service answered 404/410 for that endpoint since the server
  *         started: the browser must unsubscribe and subscribe anew; an older server never says it)
  *  DELETE /api/push/subscribe { endpoint }      -> 204
@@ -352,7 +356,44 @@ export type { CLIProxyStatus, CLIProxyProvider, CLIProxyLogin, CLIProxyLoginStat
 
 export type { AccessVia, AccessRefusal, DeviceRole, HealthAuth, LanExposure, BindScope, ObservedIngress, SecuritySummary, PairedDevice, PairingCode, RemoteAccess, TailscaleAccess } from "./access.ts";
 
+/**
+ * Browser stream keys: how the server tells one browser from another without a credential, so a
+ * device a browser pairs itself is not announced back to it (`DevicePairedEvent`, and the push
+ * "New device paired" notice).
+ *
+ * - Issuance: an answer to GET /api/machines/events or POST /api/push/subscribe that is served
+ *   (2xx) to a request carrying no valid key adds one: `Set-Cookie: ovis_stream_<key>=1;
+ *   Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000` (plus `Secure` over https), `<key>` 32
+ *   lowercase hex characters from 16 random bytes. A request that carries one is issued nothing.
+ * - Format: the key is in the cookie's NAME and the value is always `1`. Tabs that open at once,
+ *   before the browser held a key, each get one; since the names differ the browser keeps them
+ *   all, and every later request carries every key. At most eight are read from one request. A
+ *   cookie with the prefix whose key is not 32 lowercase hex, or whose value is not `1`, is not a
+ *   key and is ignored (never refused); a request with none is treated as a browser without one.
+ * - Lifetime: one year, like the device cookie, so a push subscription and the browser that made
+ *   it keep matching. Nothing revokes a key: it names a browser and grants nothing.
+ * - No authority: a key never lets a request in, never selects an owner or a role, and is not read
+ *   by the gate. Losing one only means that browser may hear of its own next pairing.
+ * - Role in POST /api/devices/pair: the keys the pairing request carries are the enrollment's
+ *   origin (kept with a first-pair credential until its first return). The `device-paired` event
+ *   then skips every machines event stream opened with one of those keys, and the push notice
+ *   skips every subscription registered with one, whatever access it came through (token, this
+ *   PC, Tailscale or a paired device).
+ */
+export const STREAM_COOKIE_PREFIX = "ovis_stream_";
+
 export type { PortalStatus } from "./portal.ts";
+
+/**
+ * POST /api/devices/revoke-all: every paired device lost its pairing access in one durable write,
+ * the caller's own included (its device cookie is cleared by the answer). Only pairing ends: the
+ * access token, this PC itself and the PC's Tailscale login get in as before, and the gate stays
+ * closed to strangers.
+ */
+export interface DevicesRevokedAll {
+  /** how many devices were paired before */
+  readonly revoked: number;
+}
 
 export type { PushKey, PushPayload } from "./push.ts";
 

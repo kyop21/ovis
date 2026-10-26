@@ -12,6 +12,7 @@ import type {
   CreateWorktreeRequest,
   CreateTabRequest,
   CreateWorkspaceRequest,
+  DevicesRevokedAll,
   DirectoryCreated,
   DirectoryListing,
   FileInfo,
@@ -431,6 +432,15 @@ export async function renameDevice(id: string, label: string): Promise<PairedDev
 
 export async function revokeDevice(id: string): Promise<void> {
   await sendJson(`/api/devices/${encodeURIComponent(id)}`, "DELETE", {});
+}
+
+/**
+ * POST /api/devices/revoke-all: every paired device loses its pairing access in one durable step,
+ * this browser's own included (the answer clears its device cookie). The access token, the PC
+ * itself and its Tailscale login get in as before.
+ */
+export async function revokeAllDevices(): Promise<DevicesRevokedAll> {
+  return (await sendJson("/api/devices/revoke-all", "POST", {})).json();
 }
 
 /** DELETE /api/auth: clears the session and device cookies, so the next health check reports the gate again. */

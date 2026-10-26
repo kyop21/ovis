@@ -14,7 +14,7 @@
  * a chat gets a demo answer.
  * What does not: files, images, push and remote PCs, which need a real machine.
  */
-import type { AgentIntegration, AgentStatus, CommandForm, CommandOutcome, ConversationTurn, IntegrationsResponse, Machine, MachineEvent, OmoActivity, OmoTask, PaneBackgroundAgentDetail, PaneDirection, PaneFindMatch, PaneFindRequest, PanePlan, PaneResized, PaneSplit, PaneSwapped, PaneZoomed, PendingMessage, PlanStep, PluginActionResult, PluginActions, PluginActionsResponse, PortalStatus, SecuritySummary, ServerMessage, SessionSnapshot, SlashCommand, TabMoved, TabMovedToWorkspace, UsageReport, WorkspaceCreated, WorkspaceInfo, WorktreeEntry, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../../shared/protocol.ts";
+import type { AgentIntegration, AgentStatus, CommandForm, CommandOutcome, ConversationTurn, DevicePairedEvent, DevicesRevokedAll, HealthAuth, IntegrationsResponse, Machine, MachineEvent, OmoActivity, OmoTask, PairedDevice, PairingCode, PaneBackgroundAgentDetail, PaneDirection, PaneFindMatch, PaneFindRequest, PanePlan, PaneResized, PaneSplit, PaneSwapped, PaneZoomed, PendingMessage, PlanStep, PluginActionResult, PluginActions, PluginActionsResponse, PortalStatus, SecuritySummary, ServerMessage, SessionSnapshot, SlashCommand, TabMoved, TabMovedToWorkspace, UsageReport, WorkspaceCreated, WorkspaceInfo, WorktreeEntry, WorktreeListing, WorktreeOpened, WorktreeRemoved } from "../../shared/protocol.ts";
 import type { RepoBranchComparison, RepoDiffFile, RepoDiffFileList, RepoDiffFilePatch, RepoDiffRefs, RepoDiffRepository, RepoDiffScope, SessionHistoryAgent, SessionHistoryResponse, SessionResumeResponse } from "../../shared/protocol.ts";
 import { normalizeThemeChange, sharedPreferencesBody, type SharedPreferences } from "../../shared/preferences.ts";
 import { VOICE_DEFAULTS, type VoiceStatus } from "../../shared/voice.ts";
@@ -1037,6 +1037,57 @@ function usageReport(): UsageReport {
   ] };
 }
 
+// ---- paired devices (Settings → Phone & devices) ----------------------------------------------
+
+/**
+ * Fictional paired devices, and what that page does with them: rename, revoke one, revoke all,
+ * and start a pairing that a fictional phone completes a moment later, which is what sends the
+ * `device-paired` event every open window shows as a line (src/components/DevicePairedNotice.tsx).
+ * `?demo_devices=` picks another state for the browser lane's captures: `empty` (nothing paired),
+ * `watch` (this browser is a device that only watches), `slow` (the list is held until the page calls
+ * `herdrDemoReleaseDevices()`, so a capture of the loading state never races the answer) or `error`
+ * (the registry cannot be written, so revoking fails). No real credential is involved anywhere.
+ * `?demo_connection=drops` loses the bridge connection right after the first pairing is heard, and
+ * never gets it back: the line stays while the header says it is reconnecting. `?demo_pairing=held`
+ * keeps the fictional phone from entering the code until the page calls `herdrDemoReleasePairing()`
+ * (once per pairing started), so the lane sees the code before the enrollment takes it away; without
+ * it, the phone enters the code a moment later, as a visitor to the demo expects.
+ */
+const DEVICE_STATE = new URLSearchParams(location.search).get("demo_devices");
+const CONNECTION_DROPS = new URLSearchParams(location.search).get("demo_connection") === "drops";
+let connectionLost = false;
+const DEVICE_PAIRS_AFTER_MS = 1800;
+/** `held`: each pairing started waits here until the page releases it; no timer decides it */
+const PAIRING_HELD = new URLSearchParams(location.search).get("demo_pairing") === "held";
+const heldPairings: (() => void)[] = [];
+if (PAIRING_HELD) (globalThis as { herdrDemoReleasePairing?: () => boolean }).herdrDemoReleasePairing = () => {
+  const release = heldPairings.shift();
+  release?.();
+  return release !== undefined;
+};
+/** `slow`: the device list waits on this until `herdrDemoReleaseDevices()` is called; no timer decides it */
+const deviceListHeld = DEVICE_STATE === "slow" ? new Promise<void>((resolve) => { (globalThis as { herdrDemoReleaseDevices?: () => void }).herdrDemoReleaseDevices = resolve; }) : null;
+const demoDevices: PairedDevice[] = DEVICE_STATE === "empty" ? [] : [
+  { id: "6f1c2a9d4b7e8503", label: "Pixel 9", role: "drive", created_at: ago(41 * 24 * 60), last_seen_at: ago(3), current: DEVICE_STATE === "watch" },
+  { id: "0b8e7d6c5a493f21", label: "iPad", role: "drive", created_at: ago(12 * 24 * 60), last_seen_at: ago(26 * 60), current: false },
+  { id: "c3d9e1f24a5b6078", label: "Kitchen laptop, the old one with the broken hinge", role: "drive", created_at: ago(3 * 24 * 60), last_seen_at: null, current: false },
+];
+const demoAuth: HealthAuth = DEVICE_STATE === "watch" ? { required: false, authenticated: true, via: "device", role: "watch" } : { required: false, authenticated: true };
+let demoPairings = 0;
+// what a server answers when the registry write fails (server/http.ts): a log reference, nothing more
+const registryUnwritable = () => error("internal_error", "internal error (d3m0f41l0001)", 500);
+/** The fictional phone that enters the code: a device more, and the event every window hears. */
+function demoDevicePairs(): void {
+  demoPairings += 1;
+  const device: PairedDevice = { id: `${demoPairings.toString(16).padStart(4, "0")}9e2d1c0b7a6f`, label: demoPairings === 1 ? "Living-room iPad" : `Phone ${demoPairings}`, role: "drive", created_at: new Date().toISOString(), last_seen_at: new Date().toISOString(), current: false };
+  demoDevices.push(device);
+  emitSse({ type: "device-paired", event_id: `d${demoPairings.toString(16).padStart(15, "0")}`, device_id: device.id, label: device.label, enrolled_at: device.created_at } satisfies DevicePairedEvent);
+  if (CONNECTION_DROPS) {
+    connectionLost = true;
+    for (const socket of [...sockets]) socket.close(1006, "demo: the connection was lost");
+  }
+}
+
 /** One fictional plugin, so the palette's Plugin actions group and Settings have something to show. */
 const PLUGINS: PluginActions[] = [
   { plugin_id: "example.layout", name: "Layout", version: "0.1.0", description: "Apply project layouts", enabled: true, actions: [
@@ -1066,7 +1117,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
 
   if (path === "/api/health") {
     const variant = demoSecurity();
-    const auth = variant === "watch" ? { required: false, authenticated: true, via: "device" as const, role: "watch" as const } : { required: false, authenticated: true };
+    // a device that only watches, from either demo switch: the security facts' own, or the device states' (`?demo_devices=watch`)
+    const auth: HealthAuth = variant === "watch" ? { required: false, authenticated: true, via: "device", role: "watch" } : demoAuth;
     const security = DEMO_SECURITY_FACTS[variant];
     const facts = security ? { security } : {};
     // only the herdr-free bridge scope fails or waits: the rest of the demo keeps answering
@@ -1078,6 +1130,35 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     // the LAN warning is drawn only where a real server would send it: an other-address bind, no token, nothing paired
     const lan = variant === "unknown" ? { lan_exposure: { host: "0.0.0.0" } } : {};
     return json({ ok: true, herdr: { version: "0.9.0", protocol: 22, terminal_attach: true }, auth, ...lan, ...facts, web_ui: { boot_id: orderOf(local.id).epoch, revision: null } }, 200, { "cache-control": "no-store" });
+  }
+  if (path === "/api/devices") {
+    // the `slow` state: held until released, so the lane captures the page while its list loads
+    if (deviceListHeld) await deviceListHeld;
+    return json({ devices: demoDevices }, 200, { "cache-control": "no-store" });
+  }
+  if (path === "/api/devices/pair/start") {
+    if (demoAuth.role === "watch") return error("read_only", "this device can only watch", 403);
+    if (PAIRING_HELD) heldPairings.push(demoDevicePairs);
+    else setTimeout(demoDevicePairs, DEVICE_PAIRS_AFTER_MS);
+    return json({ code: "482913", expires_at: new Date(Date.now() + 10 * 60_000).toISOString() } satisfies PairingCode, 200, { "cache-control": "no-store" });
+  }
+  if (path === "/api/devices/revoke-all") {
+    if (demoAuth.role === "watch") return error("read_only", "this device can only watch", 403);
+    if (DEVICE_STATE === "error") return registryUnwritable();
+    const revoked = demoDevices.length;
+    demoDevices.length = 0;
+    return json({ revoked } satisfies DevicesRevokedAll, 200, { "cache-control": "no-store" });
+  }
+  const deviceId = /^\/api\/devices\/([0-9a-f]{16})$/.exec(path)?.[1];
+  if (deviceId !== undefined) {
+    if (demoAuth.role === "watch") return error("read_only", "this device can only watch", 403);
+    const index = demoDevices.findIndex((device) => device.id === deviceId);
+    if (index === -1) return error("not_found", "no such device", 404);
+    if (DEVICE_STATE === "error") return registryUnwritable();
+    if (method === "DELETE") { demoDevices.splice(index, 1); return new Response(null, { status: 204 }); }
+    const label = String((await bodyOf(init, input))["label"] ?? "").replace(/\s+/g, " ").trim().slice(0, 48) || "Device";
+    demoDevices[index] = { ...demoDevices[index]!, label };
+    return json(demoDevices[index]);
   }
   if (path === "/api/machines") {
     const asked = query.getAll("verify_source_boot");
@@ -1909,7 +1990,8 @@ class DemoSocket extends EventTarget {
     // opens on its own tick, like a real socket; `later` guards on OPEN, so not through it
     const opening = setTimeout(() => {
       this.timers.delete(opening);
-      if (this.readyState !== 0) return;
+      // a lost connection stays lost: every new socket keeps trying and never opens
+      if (this.readyState !== 0 || connectionLost) return;
       this.readyState = 1;
       const open = new Event("open");
       this.onopen?.(open);

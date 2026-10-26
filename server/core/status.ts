@@ -189,6 +189,10 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
   const logPushError = (error: unknown): void => {
     console.error(`web push: ${error instanceof Error ? error.message : String(error)}`);
   };
+  // a device durably enrolled: every other device with alerts on hears of it at once (server/devices.ts announces
+  // only after the registry write succeeded, so nothing is told of a pairing that did not happen)
+  // nor is the browser that paired, by its stream keys, whatever access its subscriptions came through
+  devices.onPaired((event, origin) => { push.devicePaired(event, origin).catch(logPushError); });
 
   /** Status of EVERY pane, attached or not: one collector feeds all connected clients and web push. */
   function omoChanged(paneId: string, derived: AgentStatus, background: number, turn: boolean, rest: OmoRest | undefined): void {

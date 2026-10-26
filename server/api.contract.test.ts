@@ -1,4 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll, spyOn } from "bun:test";
+import { CLEAR_LEGACY_DEVICE_COOKIE, DEVICE_COOKIE_CLEARED } from "./auth.ts";
 import { Database } from "bun:sqlite";
 import { appendFileSync, chmodSync, closeSync, constants as fsConstants, copyFileSync, mkdirSync, mkdtempSync, existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync, openSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, watch, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -3993,6 +3994,39 @@ describe("pairing and identity", () => {
     expect(await auth({ ...proxied(), cookie })).toMatchObject({ authenticated: false, reason: "pairing_required" });
     expect(await auth(proxied())).toMatchObject({ authenticated: false, reason: "pairing_required" });
     expect(await auth()).toMatchObject({ authenticated: true, via: "local" });
+  });
+
+  it("revokes every device in one answer that clears the caller's own cookie, and takes revoke-all for no device id", async () => {
+    const pair = async (label: string) => {
+      const { code } = (await (await fetch(`${base()}/api/devices/pair/start`, { method: "POST", headers: guard })).json()) as { code: string };
+      const paired = await fetch(`${base()}/api/devices/pair`, { method: "POST", headers: { ...guard, ...proxied() }, body: JSON.stringify({ code, label }) });
+      expect(paired.status).toBe(204);
+      return paired.headers.get("set-cookie")!.split(";")[0]!;
+    };
+    const phone = await pair("Phone");
+    const tablet = await pair("Tablet");
+    expect(await auth({ ...proxied(), cookie: tablet })).toMatchObject({ authenticated: true, via: "device" });
+    // the route comes before the device ids: another method on it is refused as a method, never read as a device
+    const asDevice = await fetch(`${base()}/api/devices/revoke-all`, { method: "DELETE", headers: guard });
+    expect([asDevice.status, ((await asDevice.json()) as ApiError).error.code]).toEqual([400, "method_not_allowed"]);
+    expect((await fetch(`${base()}/api/devices/revoke-all`, { method: "POST" })).status).toBe(403); // the mutation guard
+    // from a paired device: everything paired goes, that device's own pairing included, and its cookie with the answer
+    const revoked = await fetch(`${base()}/api/devices/revoke-all`, { method: "POST", headers: { ...guard, ...proxied(), cookie: tablet } });
+    expect(revoked.status).toBe(200);
+    expect(revoked.headers.get("content-type")).toContain("application/json");
+    expect(revoked.headers.get("cache-control")).toBe("no-store");
+    expect(await revoked.json()).toEqual({ revoked: 2 });
+    expect(revoked.headers.getSetCookie()).toEqual([DEVICE_COOKIE_CLEARED, CLEAR_LEGACY_DEVICE_COOKIE]);
+    for (const cookie of [phone, tablet]) expect(await auth({ ...proxied(), cookie })).toMatchObject({ authenticated: false, reason: "pairing_required" });
+    expect(((await (await fetch(`${base()}/api/devices`)).json()) as { devices: unknown[] }).devices).toEqual([]);
+    // the gate stays shut to strangers; this PC and the PC's Tailscale login are in as before
+    expect(await auth(proxied())).toMatchObject({ authenticated: false, reason: "pairing_required" });
+    expect(await auth()).toMatchObject({ authenticated: true, via: "local" });
+    expect(await auth(proxied(OWNER))).toMatchObject({ authenticated: true, via: "tailscale" });
+    // with nothing left to revoke the answer is the same shape, and still a durable write
+    const again = await fetch(`${base()}/api/devices/revoke-all`, { method: "POST", headers: guard });
+    expect([again.status, await again.json()]).toEqual([200, { revoked: 0 }]);
+    expect(JSON.parse(readFileSync(join(openState, "devices.json"), "utf8"))).toEqual({ gate_closed_at: expect.any(String), devices: [] });
   });
 
   it("the plugin script prints a code a headless PC's owner can hand to a phone", async () => {

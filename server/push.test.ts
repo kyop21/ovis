@@ -8,6 +8,7 @@ import { paneStorageId } from "../shared/machines.ts";
 import type { AgentStatus, HerdrPane, SessionSnapshot } from "../shared/protocol.ts";
 import { CompletionTracker } from "./completion.ts";
 import { handlePreferencesRequest, PreferenceStore } from "./preferences.ts";
+import { DeviceStore } from "./devices.ts";
 import { createPushService, handlePushRequest, parseSubscription, type PushService } from "./push.ts";
 import { startFakePushService, type FakePushService } from "./push.fake.ts";
 import { privateStateFs } from "./private-state.ts";
@@ -590,6 +591,108 @@ it("keeps a pending alert across re-registration but drops it after device revoc
   // The registry still blocks delivery if push-file cleanup cannot run.
   await push.settled();
   expect(fake.received).toHaveLength(1);
+});
+
+it("revoked owner cannot receive queued push", async () => {
+  const devices = new DeviceStore(stateDir);
+  const owner = devices.pair(devices.startPairing().code, "Owner", "drive")!;
+  devices.match(owner.token);
+  // the server's rule (server/core/status.ts): a device's subscription delivers only while that device is paired
+  const push = createPushService({ loopbackHttp: true, stateDir, timing: { short: 20 }, canDeliver: (id) => id === null || (id === undefined ? !devices.gated : devices.has(id)) });
+  push.subscribe(fake.subscription, undefined, owner.device.id);
+  push.seed([pane("w1:p1", "working", "claude")]);
+  await push.onStatus("w1:p1", "blocked");
+  // every device is revoked while the alert waits: the registry alone keeps it from going out,
+  // before any push-file cleanup has run
+  expect(devices.revokeAll()).toEqual([owner.device.id]);
+  await push.settled();
+  expect(fake.received).toHaveLength(0);
+  await push.onStatus("w1:p1", "working");
+  await push.onStatus("w1:p1", "blocked");
+  await push.settled();
+  expect(fake.received).toHaveLength(0);
+  // the cleanup that follows works from the revoked ids and forgets the subscription for good
+  push.revokeDevice(owner.device.id);
+  expect(JSON.parse(readFileSync(join(stateDir, "push-subscriptions.json"), "utf8"))).toEqual([]);
+});
+
+it("tells every other subscriber of a durable enrollment at once, and never the new device", async () => {
+  const other = await startFakePushService();
+  try {
+    const devices = new DeviceStore(stateDir);
+    // a window in use holds alerts back (#751); an enrollment is told regardless, since that window may be the new device's
+    const push = createPushService({ loopbackHttp: true, stateDir, inUse: () => true, canDeliver: (id) => id === null || (id === undefined ? !devices.gated : devices.has(id)) });
+    const deliveries: Promise<void>[] = [];
+    devices.onPaired((event) => deliveries.push(push.devicePaired(event)));
+    // the first device: its credential is issued unconfirmed, so its id is known before it is enrolled
+    const tablet = devices.pair(devices.startPairing().code, "Tablet", "drive")!;
+    push.subscribe(fake.subscription, undefined, null);
+    push.subscribe(other.subscription, undefined, tablet.device.id);
+    expect(deliveries).toHaveLength(0);
+    // its first request back is the durable enrollment
+    devices.match(tablet.token);
+    expect(deliveries).toHaveLength(1);
+    await Promise.all(deliveries);
+    expect(fake.received.map((push) => push.payload)).toEqual([{ pane_id: null, title: "Ovis", body: "New device paired: Tablet", tag: expect.stringMatching(/^herdr-device-paired-[0-9a-f]{16}$/) }]);
+    expect(fake.received[0]!.urgency).toBe("high");
+    expect(other.received).toHaveLength(0);
+    // a gated pairing is durable at once: both the PC's browser and the tablet hear of the phone
+    const phone = devices.pair(devices.startPairing().code, "Phone", "drive")!;
+    expect(deliveries).toHaveLength(2);
+    await Promise.all(deliveries);
+    expect(fake.received.map((push) => push.payload.body)).toEqual(["New device paired: Tablet", "New device paired: Phone"]);
+    expect(other.received.map((push) => push.payload.body)).toEqual(["New device paired: Phone"]);
+    expect(fake.received[1]!.payload.tag).not.toBe(fake.received[0]!.payload.tag);
+    // the phone's later requests, a rename and a last-seen write, announce nothing more
+    devices.match(phone.token, Date.now() + 120_000);
+    devices.update(phone.device.id, { label: "Pixel" });
+    expect(deliveries).toHaveLength(2);
+  } finally { other.stop(); }
+});
+
+it("never pushes a browser's own pairing to it, before or after it paired, while others sharing its sign-in hear it", async () => {
+  const sibling = await startFakePushService();
+  const keyless = await startFakePushService();
+  try {
+    const devices = new DeviceStore(stateDir);
+    devices.match(devices.pair(devices.startPairing().code, "First", "drive")!.token);
+    let push = createPushService({ loopbackHttp: true, stateDir, inUse: () => true, canDeliver: (id) => id === null || (id === undefined ? !devices.gated : devices.has(id)) });
+    const deliveries: Promise<void>[] = [];
+    devices.onPaired((event, origin) => deliveries.push(push.devicePaired(event, origin)));
+    const self = "a".repeat(32);
+    const raced = "c".repeat(32);
+    const subscribe = (subscription: unknown, owner: string | null, keys: string[]) => handlePushRequest(new Request("http://localhost/api/push/subscribe", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ subscription }),
+    }), "/api/push/subscribe", push, owner, keys);
+    // three browsers on the same access token (owner null): this one, another with a key of its own, one with none
+    expect((await subscribe(fake.subscription, null, [self]))?.status).toBe(204);
+    expect((await subscribe(sibling.subscription, null, ["b".repeat(32)]))?.status).toBe(204);
+    expect((await subscribe(keyless.subscription, null, []))?.status).toBe(204);
+    expect(JSON.parse(readFileSync(join(stateDir, "push-subscriptions.json"), "utf8"))[0]).toMatchObject({ device_id: null, browser_keys: [self] });
+    // a restart reads the keys back
+    push = createPushService({ loopbackHttp: true, stateDir, inUse: () => true, canDeliver: (id) => id === null || (id === undefined ? !devices.gated : devices.has(id)) });
+    // this browser pairs itself, carrying the key it subscribed with and one a racing tab added
+    const own = devices.pair(devices.startPairing().code, "Self", "drive", Date.now(), [raced, self])!;
+    await Promise.all(deliveries);
+    expect(fake.received).toHaveLength(0);
+    expect(sibling.received.map((push) => push.payload.body)).toEqual(["New device paired: Self"]);
+    expect(keyless.received.map((push) => push.payload.body)).toEqual(["New device paired: Self"]);
+    // re-registered on load, now owned by the device it paired, with no key this time: it keeps its browser
+    expect((await subscribe(fake.subscription, own.device.id, []))?.status).toBe(204);
+    // a key this browser was issued later (it had lost its cookie) is added to the ones it had, not swapped for them
+    const reissued = "e".repeat(32);
+    expect((await subscribe(fake.subscription, own.device.id, [reissued]))?.status).toBe(204);
+    expect(JSON.parse(readFileSync(join(stateDir, "push-subscriptions.json"), "utf8"))[0]).toMatchObject({ device_id: own.device.id, browser_keys: [self, reissued] });
+    // it pairs again: still its own pairing
+    devices.pair(devices.startPairing().code, "Again", "drive", Date.now(), [self]);
+    await Promise.all(deliveries);
+    expect(fake.received).toHaveLength(0);
+    expect(sibling.received.map((push) => push.payload.body)).toEqual(["New device paired: Self", "New device paired: Again"]);
+    // and another browser's pairing reaches it
+    devices.pair(devices.startPairing().code, "Elsewhere", "drive", Date.now(), ["d".repeat(32)]);
+    await Promise.all(deliveries);
+    expect(fake.received.map((push) => push.payload.body)).toEqual(["New device paired: Elsewhere"]);
+  } finally { sibling.stop(); keyless.stop(); }
 });
 
 it("keeps a subscription made through the open LAN only while the LAN stays open", async () => {
