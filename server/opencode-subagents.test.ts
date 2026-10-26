@@ -475,7 +475,7 @@ describe("the OpenCode subagent tracker", () => {
     const ask = (live: boolean, claudeLive: boolean | null) => handleTasksRequest(...request(), {
       omo: { sessionOf: () => null },
       claudeAgents: { sessionOf: () => claudeLive === null ? null : { path: join(root, "absent.jsonl"), live: claudeLive, startedAt: null }, ensure: async () => undefined },
-      opencodeAgents: { sessionOf: () => ({ path: s.path, session: s.parent, live }), ensure: () => false, tasksOf: () => listOf(s.parent, live) },
+      opencodeAgents: { sessionOf: () => ({ path: s.path, session: s.parent, live }), ensure: () => false, beginRead: () => 0, tasksOf: () => listOf(s.parent, live) },
     });
     const tasks = async (response: Response | null) => ((await response!.json()) as { tasks: { id: string; status: string }[] }).tasks.map((task) => [task.id, task.status]);
     expect(await tasks(await ask(true, null))).toEqual([["ses_working", "running"]]);
@@ -489,7 +489,7 @@ describe("the OpenCode subagent tracker", () => {
       omo: { sessionOf: () => null },
       claudeAgents: { sessionOf: () => claudeNow ? { path: join(root, "absent.jsonl"), live: true, startedAt: null } : null, ensure: async () => undefined },
       opencodeAgents: {
-        sessionOf: () => ({ path: s.path, session: s.parent, live: !claudeNow }), ensure: () => false,
+        sessionOf: () => ({ path: s.path, session: s.parent, live: !claudeNow }), ensure: () => false, beginRead: () => 0,
         tasksOf: async () => { reads++; const read = await listOf(s.parent, true); claudeNow = true; return read; },
       },
     });
@@ -503,7 +503,7 @@ describe("the OpenCode subagent tracker", () => {
       omo: { sessionOf: () => null },
       claudeAgents: { sessionOf: () => null, ensure: async () => undefined },
       opencodeAgents: {
-        sessionOf: () => ({ path: s.path, session: moved ? "ses_moved" : s.parent, live: true }), ensure: () => false,
+        sessionOf: () => ({ path: s.path, session: moved ? "ses_moved" : s.parent, live: true }), ensure: () => false, beginRead: () => 0,
         tasksOf: async () => { const read = await listOf(moved ? "ses_moved" : s.parent, true); moved = true; return read; },
       },
     });
@@ -517,7 +517,7 @@ describe("the OpenCode subagent tracker", () => {
       omo: { sessionOf: () => omoNow ? { cwd: omoCwd, sessionId: "omo-session" } : null },
       claudeAgents: { sessionOf: () => null, ensure: async () => undefined },
       opencodeAgents: {
-        sessionOf: () => ({ path: s.path, session: s.parent, live: true }), ensure: () => false,
+        sessionOf: () => ({ path: s.path, session: s.parent, live: true }), ensure: () => false, beginRead: () => 0,
         tasksOf: async () => { const read = await listOf(s.parent, true); omoNow = true; return read; },
       },
     });
@@ -528,7 +528,7 @@ describe("the OpenCode subagent tracker", () => {
       omo: { sessionOf: () => null },
       claudeAgents: { sessionOf: () => null, ensure: async () => undefined },
       opencodeAgents: {
-        sessionOf: () => ({ path: s.path, session: flips === 0 ? s.parent : `ses_flip${flips}`, live: true }), ensure: () => false,
+        sessionOf: () => ({ path: s.path, session: flips === 0 ? s.parent : `ses_flip${flips}`, live: true }), ensure: () => false, beginRead: () => 0,
         tasksOf: async () => { const read = await listOf(flips === 0 ? s.parent : `ses_flip${flips}`, true); flips++; return read; },
       },
     });

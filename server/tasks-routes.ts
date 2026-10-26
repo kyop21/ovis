@@ -14,7 +14,7 @@ import type { OpencodeSubagentStatus } from "./opencode-subagents.ts";
 export type TaskTrackers = {
   omo: Pick<OmoStatus, "sessionOf">;
   claudeAgents: Pick<ClaudeSubagentStatus, "sessionOf" | "ensure">;
-  opencodeAgents: Pick<OpencodeSubagentStatus, "sessionOf" | "ensure" | "tasksOf">;
+  opencodeAgents: Pick<OpencodeSubagentStatus, "sessionOf" | "ensure" | "tasksOf" | "beginRead">;
 };
 
 /** The answer for the background tasks route, or null when the path is not it. */
@@ -32,8 +32,10 @@ export async function handleTasksRequest(request: Request, url: URL, pathname: s
     // An unknown pane costs a fresh herdr lookup too; the client bounds its discovery retries.
     if (omo.sessionOf(paneId) === null && claudeAgents.sessionOf(paneId) === null && opencodeAgents.sessionOf(paneId) === null) {
       await within(1000, (async () => {
+        // numbered as it begins: a snapshot read since is newer than what this lookup answers
+        const begun = opencodeAgents.beginRead();
         const pane = await paneGet(paneId);
-        opencodeAgents.ensure(pane);
+        opencodeAgents.ensure(pane, begun);
         await claudeAgents.ensure(pane);
       })());
     }

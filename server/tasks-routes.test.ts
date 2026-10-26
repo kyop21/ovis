@@ -69,7 +69,7 @@ describe("handleTasksRequest with an OmO session", () => {
       mkdirSync(runs, { recursive: true });
       writeFileSync(join(runs, "dag_1.json"), JSON.stringify({ runId: "dag_1", parentSessionId: "session-1", name: "Bug-fix round", status: "running", nodes: [] }));
       const claudeAgents = { sessionOf: () => { throw new Error("not asked"); }, ensure: async () => { throw new Error("not asked"); } };
-      const opencodeAgents = { sessionOf: () => { throw new Error("not asked"); }, ensure: () => { throw new Error("not asked"); }, tasksOf: () => { throw new Error("not asked"); } };
+      const opencodeAgents = { sessionOf: () => { throw new Error("not asked"); }, ensure: () => { throw new Error("not asked"); }, tasksOf: () => { throw new Error("not asked"); }, beginRead: () => { throw new Error("not asked"); } };
       const response = await handleTasksRequest(new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks", { omo: { sessionOf: (paneId) => paneId === "w1:p1" ? { cwd, sessionId: "session-1" } : null }, claudeAgents, opencodeAgents });
       expect(response?.status).toBe(200);
       const body = await response!.json() as { tasks: { id: string; title: string; status: string }[]; runs: { id: string; name: string; status: string }[]; server_time: string };
