@@ -286,6 +286,26 @@ describe("the OpenCode subagent tracker", () => {
     expect(resets).toEqual([["w1:p2", true], ["w1:p2", false]]);
   });
 
+  it("never takes a read of a pane begun before one it already took", () => {
+    const s = store();
+    s.session("ses_working", NOW - 5 * MIN);
+    s.prompt("ses_working", NOW - 5 * MIN);
+    const resets: [string, boolean][] = [];
+    const tracker = new OpencodeSubagentStatus({ store: () => s.path, now: () => NOW, onChange: () => undefined, onReset: (paneId, first) => resets.push([paneId, first]) });
+    // a snapshot's read begins, then a lookup made since finds the pane's session
+    const stale = tracker.beginRead();
+    tracker.ensure(pane(s.parent));
+    tracker.poll();
+    // the snapshot, read before it, still shows OpenCode's home screen, or no such pane yet
+    tracker.refresh([pane(null)], stale);
+    tracker.refresh([], stale);
+    expect(tracker.sessionOf("w1:p1")?.live).toBe(true);
+    expect(tracker.countOf("w1:p1")).toBe(1);
+    // a newer read of the same session: no new lifetime
+    tracker.refresh([pane(s.parent)]);
+    expect(resets).toEqual([]);
+  });
+
   it("keeps the count while the store cannot be read", () => {
     const s = store();
     let path = s.path;

@@ -105,18 +105,18 @@ export function readSubagents(db: Database, sessionId: string, live: boolean, no
   const columns = new Set(db.query<{ name: string }, []>("SELECT name FROM pragma_table_info('session_v2')").all().map((column) => column.name));
   // 1.x tables, or a 2.0 store from before child sessions: no subagents to tell of
   if (!columns.has("parent_id")) return NOTHING;
-  // every child's newest run row, without the row's whole data (a step can be large): each one whose run has not ended
-  // with an idle row, to be classified here, then the newest ended ones, for the list
-  const read = (only: string, limit: string): ChildRun[] => db.query<ChildRun, [string]>(`
+  // every child's newest run row, in one read, without the row's whole data (a step can be large): each one whose run
+  // has not ended with an idle row is classified, and of the ended ones the newest, for the list
+  let ended = 0;
+  const runs = db.query<ChildRun, [string]>(`
     SELECT s.id, s.time_created AS created, m.type, m.time_created AS at,
       ${["outcome:$.outcome", "created_at:$.time.created", "completed:$.time.completed", "finish:$.finish", "error_type:$.error.type"]
     .map((field) => field.split(":")).map(([name, path]) => `CASE WHEN json_valid(m.data) THEN json_extract(m.data, '${path}') END AS ${name}`).join(", ")},
       CASE WHEN json_valid(m.data) THEN json_type(m.data, '$.error') END AS error
     FROM session_v2 AS s JOIN session_message AS m ON m.id = (
       SELECT id FROM session_message WHERE session_id = s.id AND type IN ${RUN_ROWS} ORDER BY seq DESC LIMIT 1)
-    WHERE s.parent_id = ?${columns.has("time_archived") ? " AND s.time_archived IS NULL" : ""}${only}
-    ORDER BY s.time_created DESC${limit}`).all(sessionId);
-  const runs = [...read(" AND m.type != 'idle'", ""), ...read(" AND m.type = 'idle'", ` LIMIT ${MAX_CHILDREN}`)];
+    WHERE s.parent_id = ?${columns.has("time_archived") ? " AND s.time_archived IS NULL" : ""}
+    ORDER BY s.time_created DESC`).all(sessionId).filter((run) => run.type !== "idle" || ++ended <= MAX_CHILDREN);
   const prompt = db.query<{ data: string; time_created: number }, [string]>(
     "SELECT data, time_created FROM session_message WHERE session_id = ? AND type = 'user' ORDER BY seq DESC LIMIT 1",
   ).get(sessionId);
@@ -195,6 +195,9 @@ export class OpencodeSubagentStatus {
   private readonly panes = new Map<string, Tracked>();
   /** each pane's agent as last seen: whether the first session it runs follows another agent's */
   private readonly agents = new Map<string, string | null>();
+  /** reads of herdr's panes, numbered as they begin, and the newest taken for each pane: an older one never undoes it */
+  private reads = 0;
+  private readonly lastRead = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
 
@@ -231,17 +234,33 @@ export class OpencodeSubagentStatus {
     return opencodeSubagentState(known.path, known.session, known.live, this.now(), this.deps.serviceStart?.() ?? null)?.tasks ?? null;
   }
 
-  /** The OpenCode panes of a snapshot and their sessions; a pane whose binding moved is read now. */
-  refresh(panes: HerdrPane[]): void {
+  /** Numbers a read of herdr's panes as it begins, before it is awaited: what refresh and ensure are given. */
+  beginRead(): number {
+    return ++this.reads;
+  }
+
+  /** The OpenCode panes of a snapshot (`read`: when its read began) and their sessions; a pane whose binding moved is read now. */
+  refresh(panes: HerdrPane[], read = this.beginRead()): void {
     const ids = new Set(panes.map((pane) => pane.pane_id));
-    for (const paneId of this.panes.keys()) if (!ids.has(paneId)) this.panes.delete(paneId);
-    for (const paneId of this.agents.keys()) if (!ids.has(paneId)) this.agents.delete(paneId);
-    const moved = panes.filter((pane) => this.ensure(pane));
+    for (const paneId of [...this.lastRead.keys()]) {
+      if (ids.has(paneId) || this.newer(paneId, read)) continue;
+      this.panes.delete(paneId);
+      this.agents.delete(paneId);
+      this.lastRead.delete(paneId);
+    }
+    const moved = panes.filter((pane) => this.ensure(pane, read));
     if (moved.length > 0) this.poll(new Set(moved.map((pane) => pane.pane_id)));
   }
 
-  /** One pane's session, as herdr reports it now; true when its binding changed. */
-  ensure(pane: HerdrPane): boolean {
+  /** Whether a read of the pane begun after `read` was taken already. */
+  private newer(paneId: string, read: number): boolean {
+    return (this.lastRead.get(paneId) ?? 0) > read;
+  }
+
+  /** One pane's session, as herdr reports it (`read`: when that read began); true when its binding changed. */
+  ensure(pane: HerdrPane, read = this.beginRead()): boolean {
+    if (this.newer(pane.pane_id, read)) return false;
+    this.lastRead.set(pane.pane_id, read);
     const tracked = this.panes.get(pane.pane_id);
     const before = this.agents.get(pane.pane_id);
     this.agents.set(pane.pane_id, pane.agent ?? null);
