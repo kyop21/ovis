@@ -311,6 +311,63 @@ describe("the OpenCode subagent tracker", () => {
     expect(resets).toEqual([["w1:p2", true], ["w1:p2", false]]);
   });
 
+  it("reads a session of a page of children at once, and counts every one that runs when more than a page do", async () => {
+    const s = store();
+    s.prompt(s.parent, NOW - 10 * MIN);
+    for (let n = 0; n < SUBAGENT_PAGE - 1; n++) {
+      s.session(`ses_done${n}`, NOW - 40 * MIN + n);
+      s.idle(`ses_done${n}`, NOW - 30 * MIN + n);
+    }
+    s.session("ses_working", NOW - 5 * MIN);
+    s.prompt("ses_working", NOW - 5 * MIN);
+    const tracker = new OpencodeSubagentStatus({ store: () => s.path, now: () => NOW, onChange: () => undefined });
+    // a page, the last child in it: whole at once, as a turn's end needs
+    void tracker.refresh([pane(s.parent)]);
+    expect(tracker.countOf("w1:p1")).toBe(1);
+    // more running than a page: each counts, the rows kept read a page a turn
+    const busy = store();
+    for (let n = 0; n < SUBAGENT_PAGE + 5; n++) {
+      busy.session(`ses_run${n}`, NOW - 5 * MIN + n);
+      busy.prompt(`ses_run${n}`, NOW - 5 * MIN + n);
+    }
+    expect(opencodeSubagentState(busy.path, busy.parent, true, NOW, null, false)?.running).toBe(SUBAGENT_PAGE + 5);
+    const many = new OpencodeSubagentStatus({ store: () => busy.path, now: () => NOW, onChange: () => undefined });
+    await many.refresh([pane(busy.parent)]);
+    expect(many.countOf("w1:p1")).toBe(SUBAGENT_PAGE + 5);
+  });
+
+  it("tells a pane that leaves its session while a read of it goes on at once, and drops what that read finds", async () => {
+    const s = store();
+    for (let n = 0; n < SUBAGENT_PAGE + 5; n++) {
+      s.session(`ses_done${n}`, NOW - 40 * MIN + n);
+      s.idle(`ses_done${n}`, NOW - 30 * MIN + n);
+    }
+    s.session("ses_working", NOW - 5 * MIN);
+    s.prompt("ses_working", NOW - 5 * MIN);
+    const changes: unknown[] = [];
+    const tracker = new OpencodeSubagentStatus({ store: () => s.path, now: () => NOW, onChange: (...args) => changes.push(args) });
+    await tracker.refresh([pane(s.parent)]);
+    expect(tracker.countOf("w1:p1")).toBe(1);
+    // a read goes on, and the pane goes back to OpenCode's home screen meanwhile
+    const reading = tracker.poll();
+    void tracker.refresh([pane(null)]);
+    expect(tracker.countOf("w1:p1")).toBe(0);
+    await reading;
+    expect(tracker.countOf("w1:p1")).toBe(0);
+    expect(changes.at(-1)).toEqual(["w1:p1", 0, 0, null]);
+    // back on it, a read goes on again, and the pane moves to another session meanwhile: that one is read at once
+    await tracker.refresh([pane(s.parent)]);
+    for (const id of ["ses_other_a", "ses_other_b"]) {
+      s.session(id, NOW - 2 * MIN, { parent: "ses_other" });
+      s.prompt(id, NOW - 2 * MIN);
+    }
+    const again = tracker.poll();
+    void tracker.refresh([pane("ses_other")]);
+    expect(tracker.countOf("w1:p1")).toBe(2);
+    await again;
+    expect(tracker.countOf("w1:p1")).toBe(2);
+  });
+
   it("never takes a read of a pane begun before one it already took", () => {
     const s = store();
     s.session("ses_working", NOW - 5 * MIN);

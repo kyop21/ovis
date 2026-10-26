@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { HerdrPane } from "../../shared/protocol.ts";
+import * as collector from "../collector.ts";
 import * as conversation from "../conversation.ts";
 import * as herdr from "../herdr/client.ts";
 import * as service from "../opencode-service.ts";
@@ -13,7 +14,9 @@ import { connectionData, type Client } from "./connections.ts";
 // herdr's status events come from the test, as the collector would hand them over
 type Handlers = { onStatus: (paneId: string, status: string, agent: string) => void; onBaseline: (panes: unknown[]) => void };
 let handlers: Handlers;
+const originalCollector = collector.startStatusCollector;
 mock.module("../collector.ts", () => ({
+  ...collector,
   startStatusCollector: (seen: Handlers) => {
     handlers = seen;
     return { ready: Promise.resolve(), structureReady: Promise.resolve(), focusReady: Promise.resolve(), trackPane() {}, stop() {} };
@@ -22,7 +25,10 @@ mock.module("../collector.ts", () => ({
 const { createStatusHub } = await import("./status.ts");
 
 const root = mkdtempSync(join(tmpdir(), "herdr-status-hub-"));
-afterAll(() => rmSync(root, { recursive: true, force: true }));
+afterAll(() => {
+  mock.module("../collector.ts", () => ({ ...collector, startStatusCollector: originalCollector }));
+  rmSync(root, { recursive: true, force: true });
+});
 const stubs: { mockRestore(): void }[] = [];
 afterEach(() => { for (const stub of stubs.splice(0)) stub.mockRestore(); });
 
