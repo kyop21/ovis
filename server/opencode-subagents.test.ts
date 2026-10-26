@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import type { HerdrPane } from "../shared/protocol.ts";
 import { handleTasksRequest } from "./tasks-routes.ts";
-import { opencodeSubagentState, OpencodeSubagentStatus } from "./opencode-subagents.ts";
+import { opencodeSubagentState, OpencodeSubagentStatus, pagedState, SUBAGENT_PAGE } from "./opencode-subagents.ts";
 
 const root = mkdtempSync(join(tmpdir(), "herdr-opencode-subagents-"));
 const opened: Database[] = [];
@@ -189,6 +189,31 @@ describe("an OpenCode session's subagents are its child sessions", () => {
     const state = opencodeSubagentState(s.path, s.parent, true, NOW, null, false)!;
     expect(state.running).toBe(1);
     expect(state.tasks.map((task) => task.id)).toEqual(["ses_early", ...Array.from({ length: 10 }, (_, n) => `ses_done${ended - 1 - n}`)]);
+    // then it ends after all of them: it is the newest that ended
+    s.idle("ses_early", NOW - MIN);
+    const after = opencodeSubagentState(s.path, s.parent, true, NOW, null, false)!;
+    expect(after.running).toBe(0);
+    expect(after.tasks.map((task) => [task.id, task.status]).slice(0, 2)).toEqual([["ses_early", "completed"], [`ses_done${ended - 1}`, "completed"]]);
+  });
+
+  it("reads a session with more children than a page a page at a time, and tells a poll's count once its last page is in", async () => {
+    const s = store();
+    for (let n = 0; n < SUBAGENT_PAGE + 5; n++) {
+      s.session(`ses_done${n}`, NOW - 40 * MIN + n);
+      s.prompt(`ses_done${n}`, NOW - 40 * MIN + n);
+      s.idle(`ses_done${n}`, NOW - 30 * MIN + n);
+    }
+    s.prompt(s.parent, NOW - 10 * MIN);
+    s.session("ses_last", NOW - 5 * MIN);
+    s.prompt("ses_last", NOW - 5 * MIN);
+    expect((await pagedState(s.path, s.parent, true, NOW, null, false))?.running).toBe(1);
+    const changes: unknown[] = [];
+    const tracker = new OpencodeSubagentStatus({ store: () => s.path, now: () => NOW, onChange: (...args) => changes.push(args) });
+    // the first page holds none that runs: the rest is read after it
+    const reading = tracker.refresh([{ pane_id: "w1:p1", agent: "opencode", agent_status: "idle", agent_session: { agent: "opencode", source: "herdr:opencode", kind: "id", value: s.parent } } as HerdrPane]);
+    expect(tracker.countOf("w1:p1")).toBe(0);
+    await reading;
+    expect(changes).toEqual([["w1:p1", 1, 1, NOW - 10 * MIN]]);
   });
 
   it("reads every other child when one's newest row is not JSON", () => {
@@ -220,7 +245,7 @@ describe("the OpenCode subagent tracker", () => {
     ...(session === null ? {} : { agent_session: { agent: "opencode", source: "herdr:opencode", kind: "id", value: session } }),
   } as HerdrPane);
 
-  it("counts a pane's running subagents and tells each change once; a pane that leaves OpenCode counts none", () => {
+  it("counts a pane's running subagents and tells each change once; a pane that leaves OpenCode counts none", async () => {
     const s = store();
     const changes: unknown[] = [];
     const resets: string[] = [];
@@ -249,7 +274,7 @@ describe("the OpenCode subagent tracker", () => {
     expect(tracker.countOf("w1:p1")).toBe(0);
     expect(changes.at(-1)).toEqual(["w1:p1", 0, 0, null]);
     expect(tracker.sessionOf("w1:p1")).toEqual({ path: s.path, session: s.parent, live: false });
-    expect(tracker.tasksOf("w1:p1")?.map((task) => [task.id, task.status])).toEqual([["ses_working", "lost"]]);
+    expect((await tracker.tasksOf("w1:p1"))?.map((task) => [task.id, task.status])).toEqual([["ses_working", "lost"]]);
     // back on that session, it counts again; then the pane runs a shell
     tracker.refresh([pane(s.parent)]);
     expect(tracker.countOf("w1:p1")).toBe(1);
@@ -331,7 +356,7 @@ describe("the OpenCode subagent tracker", () => {
       new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks", {
         omo: { sessionOf: () => null },
         claudeAgents: { sessionOf: () => claudeLive === null ? null : { path: join(root, "absent.jsonl"), live: claudeLive, startedAt: null }, ensure: async () => undefined },
-        opencodeAgents: { sessionOf: () => ({ path: s.path, session: s.parent, live }), ensure: () => false, tasksOf: () => opencodeSubagentState(s.path, s.parent, live)?.tasks ?? null },
+        opencodeAgents: { sessionOf: () => ({ path: s.path, session: s.parent, live }), ensure: () => false, tasksOf: async () => (await pagedState(s.path, s.parent, live))?.tasks ?? null },
       });
     const tasks = async (response: Response | null) => ((await response!.json()) as { tasks: { id: string; status: string }[] }).tasks.map((task) => [task.id, task.status]);
     expect(await tasks(await ask(true, null))).toEqual([["ses_working", "running"]]);

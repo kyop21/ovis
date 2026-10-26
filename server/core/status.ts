@@ -156,7 +156,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
           if (service !== looked) return;
           if (at === null) { service = null; return; }
           looked.started = at;
-          opencodeAgents.poll();
+          void opencodeAgents.poll();
         }, () => { if (service === looked) service = null; });
       }
       return service.started;
@@ -208,7 +208,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
     // not waited for: finding a transcript costs process calls, and a snapshot must not wait on them.
     // The plans come after: a Claude pane's transcript is the one the subagent tracker found
     void claudeAgents.refresh(named.panes).catch(() => undefined).then(() => plans.refresh(named.panes)).catch(() => undefined);
-    opencodeAgents.refresh(named.panes, read);
+    void opencodeAgents.refresh(named.panes, read);
     // an agent this server started has had no turn yet: its start screen is no work (launched-agents.ts)
     for (const pane of named.panes) pane.agent_status = launchedAgents.settle(pane.pane_id, pane.agent_status);
     options.openCodeState?.reconcile(named.panes, promptCheckpoint);
@@ -382,7 +382,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       const tracker = omo.runs(paneId) ? null : agent === "claude" ? claudeAgents : agent === "opencode" ? opencodeAgents : null;
       if (tracker !== null) {
         settling = paneId;
-        try { tracker.poll(paneId); } finally { settling = null; }
+        try { void tracker.poll(paneId); } finally { settling = null; }
         waits.status(paneId, status);
       } else waits.forget(paneId);
       broadcastAll(paneStatus(paneId, status, tracker !== null ? { background_tasks: tracker.countOf(paneId) } : {}));
@@ -391,7 +391,7 @@ export function createStatusHub<Owner, Lease>({ options, devices, preferences, c
       // turn that ended on its subagents is held while the finish alert still waits (and is called off)
       if (tracker === opencodeAgents && opencodeAgents.sessionOf(paneId)?.live !== true) {
         const begun = opencodeAgents.beginRead();
-        void paneGet(paneId).then((pane) => { if (opencodeAgents.ensure(pane, begun)) opencodeAgents.poll(paneId); }).catch(() => undefined);
+        void paneGet(paneId).then((pane) => { if (opencodeAgents.ensure(pane, begun)) void opencodeAgents.poll(paneId); }).catch(() => undefined);
       }
     },
     // a finish reported as done, now in front at herdr's terminal: seen, idle again

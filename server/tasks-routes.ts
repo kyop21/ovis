@@ -43,7 +43,7 @@ export async function handleTasksRequest(request: Request, url: URL, pathname: s
       // an OpenCode pane's subagents are its child sessions; of a pane that ran both, the one it runs now
       const opencode = opencodeAgents.sessionOf(paneId);
       if (opencode !== null && (opencode.live || claude?.live !== true)) {
-        return jsonResponse({ tasks: opencodeAgents.tasksOf(paneId) ?? [], runs: [], server_time });
+        return jsonResponse({ tasks: (await opencodeAgents.tasksOf(paneId)) ?? [], runs: [], server_time });
       }
       return jsonResponse({ tasks: claude === null ? [] : claudeSubagents(claude.path, claude.live, Date.now(), claude.startedAt), runs: [], server_time });
     }
