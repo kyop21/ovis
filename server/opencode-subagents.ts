@@ -359,15 +359,16 @@ export class OpencodeSubagentStatus {
   /**
    * A pane's list, as the background tasks route answers it; null when the store cannot be read now. The read lets the
    * event loop go: a pane that comes to run another session (or stops running it) meanwhile is read again for that, so
-   * that the answer is the pane's own as it stands when it is given.
+   * that the answer is the pane's own as it stands when it is given. `read`: the session the list is of. Null when the
+   * pane has none, the store cannot be read now, or the pane kept moving.
    */
-  async tasksOf(paneId: string): Promise<Pick<OpencodeSubagentState, "tasks" | "unlisted"> | null> {
+  async tasksOf(paneId: string): Promise<(Pick<OpencodeSubagentState, "tasks" | "unlisted"> & { read: { path: string; session: string; live: boolean } }) | null> {
     for (let tries = 0; tries < 3; tries++) {
       const known = this.sessionOf(paneId);
-      if (known === null) return { tasks: [], unlisted: 0 };
+      if (known === null) return null;
       const state = await pagedState(known.path, known.session, known.live, this.now(), this.deps.serviceStart?.() ?? null);
       const current = this.sessionOf(paneId);
-      if (current?.path === known.path && current.session === known.session && current.live === known.live) return state;
+      if (current?.path === known.path && current.session === known.session && current.live === known.live) return state === null ? null : { tasks: state.tasks, unlisted: state.unlisted, read: known };
     }
     return null;
   }

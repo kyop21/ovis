@@ -49,8 +49,10 @@ export async function handleTasksRequest(request: Request, url: URL, pathname: s
         return jsonResponse({ tasks: claude === null ? [] : claudeSubagents(claude.path, claude.live, Date.now(), claude.startedAt), runs: [], server_time });
       }
       const read = await opencodeAgents.tasksOf(paneId);
+      // the session the list is of (the one asked about, when there is no list to give)
+      const bound = read?.read ?? opencode;
       const current = opencodeAgents.sessionOf(paneId);
-      const same = current !== null && current.path === opencode.path && current.session === opencode.session && current.live === opencode.live;
+      const same = current !== null && current.path === bound.path && current.session === bound.session && current.live === bound.live;
       if (same && omo.sessionOf(paneId) === null && (current.live || claudeAgents.sessionOf(paneId)?.live !== true)) {
         return jsonResponse({ tasks: read?.tasks ?? [], runs: [], server_time, ...(read !== null && read.unlisted > 0 ? { more_running: read.unlisted } : {}) });
       }

@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -466,54 +466,73 @@ describe("the OpenCode subagent tracker", () => {
     const now = Date.now();
     s.session("ses_working", now - 5 * MIN);
     s.prompt("ses_working", now - 5 * MIN);
-    const ask = (live: boolean, claudeLive: boolean | null) => handleTasksRequest(
-      new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks", {
-        omo: { sessionOf: () => null },
-        claudeAgents: { sessionOf: () => claudeLive === null ? null : { path: join(root, "absent.jsonl"), live: claudeLive, startedAt: null }, ensure: async () => undefined },
-        opencodeAgents: { sessionOf: () => ({ path: s.path, session: s.parent, live }), ensure: () => false, tasksOf: async () => pagedState(s.path, s.parent, live) },
-      });
+    // a tracker's answer: the session's list, and the session it is of
+    const listOf = async (session: string, live: boolean) => {
+      const state = await pagedState(s.path, session, live);
+      return state === null ? null : { tasks: state.tasks, unlisted: state.unlisted, read: { path: s.path, session, live } };
+    };
+    const request = () => [new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks"] as const;
+    const ask = (live: boolean, claudeLive: boolean | null) => handleTasksRequest(...request(), {
+      omo: { sessionOf: () => null },
+      claudeAgents: { sessionOf: () => claudeLive === null ? null : { path: join(root, "absent.jsonl"), live: claudeLive, startedAt: null }, ensure: async () => undefined },
+      opencodeAgents: { sessionOf: () => ({ path: s.path, session: s.parent, live }), ensure: () => false, tasksOf: () => listOf(s.parent, live) },
+    });
     const tasks = async (response: Response | null) => ((await response!.json()) as { tasks: { id: string; status: string }[] }).tasks.map((task) => [task.id, task.status]);
     expect(await tasks(await ask(true, null))).toEqual([["ses_working", "running"]]);
     expect(await tasks(await ask(false, false))).toEqual([["ses_working", "lost"]]);
     // the pane runs Claude Code now: its list is Claude's
     expect(await tasks(await ask(false, true))).toEqual([]);
-    // it comes to run Claude Code while OpenCode's list is read: the answer is Claude's
+    // it comes to run Claude Code while OpenCode's list is read: the answer is Claude's, after that one read
     let claudeNow = false;
-    const moving = await handleTasksRequest(
-      new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks", {
-        omo: { sessionOf: () => null },
-        claudeAgents: { sessionOf: () => claudeNow ? { path: join(root, "absent.jsonl"), live: true, startedAt: null } : null, ensure: async () => undefined },
-        opencodeAgents: {
-          sessionOf: () => ({ path: s.path, session: s.parent, live: !claudeNow }), ensure: () => false,
-          tasksOf: async () => { const read = await pagedState(s.path, s.parent, true); claudeNow = true; return read; },
-        },
-      });
+    let reads = 0;
+    const moving = await handleTasksRequest(...request(), {
+      omo: { sessionOf: () => null },
+      claudeAgents: { sessionOf: () => claudeNow ? { path: join(root, "absent.jsonl"), live: true, startedAt: null } : null, ensure: async () => undefined },
+      opencodeAgents: {
+        sessionOf: () => ({ path: s.path, session: s.parent, live: !claudeNow }), ensure: () => false,
+        tasksOf: async () => { reads++; const read = await listOf(s.parent, true); claudeNow = true; return read; },
+      },
+    });
     expect(await tasks(moving)).toEqual([]);
+    expect(reads).toBe(1);
     // it comes to run another OpenCode session while the list is read: the list is that session's
     s.session("ses_moved_child", now - MIN, { parent: "ses_moved" });
     s.prompt("ses_moved_child", now - MIN);
     let moved = false;
-    const swapped = await handleTasksRequest(
-      new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks", {
-        omo: { sessionOf: () => null },
-        claudeAgents: { sessionOf: () => null, ensure: async () => undefined },
-        opencodeAgents: {
-          sessionOf: () => ({ path: s.path, session: moved ? "ses_moved" : s.parent, live: true }), ensure: () => false,
-          tasksOf: async () => { const read = await pagedState(s.path, moved ? "ses_moved" : s.parent, true); moved = true; return read; },
-        },
-      });
+    const swapped = await handleTasksRequest(...request(), {
+      omo: { sessionOf: () => null },
+      claudeAgents: { sessionOf: () => null, ensure: async () => undefined },
+      opencodeAgents: {
+        sessionOf: () => ({ path: s.path, session: moved ? "ses_moved" : s.parent, live: true }), ensure: () => false,
+        tasksOf: async () => { const read = await listOf(moved ? "ses_moved" : s.parent, true); moved = true; return read; },
+      },
+    });
     expect(await tasks(swapped)).toEqual([["ses_moved_child", "running"]]);
-    // or OmO comes to run there: OmO's list (none in this folder), not what OpenCode left lost
+    // or OmO comes to run there while OpenCode's session reads the same as before: OmO's list
+    const omoCwd = join(root, "omo-folder");
+    mkdirSync(join(omoCwd, ".omo", "senpi-task", "tasks"), { recursive: true });
+    writeFileSync(join(omoCwd, ".omo", "senpi-task", "tasks", "st_1.json"), JSON.stringify({ task_id: "st_1", parent_session_id: "omo-session", host_pid: process.pid, status: "running", task_summary: "index the repo", started_at: new Date(now - MIN).toISOString() }));
     let omoNow = false;
-    const toOmo = await handleTasksRequest(
-      new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks", {
-        omo: { sessionOf: () => omoNow ? { cwd: root, sessionId: "omo-session" } : null },
-        claudeAgents: { sessionOf: () => null, ensure: async () => undefined },
-        opencodeAgents: {
-          sessionOf: () => ({ path: s.path, session: s.parent, live: !omoNow }), ensure: () => false,
-          tasksOf: async () => { const read = await pagedState(s.path, s.parent, true); omoNow = true; return read; },
-        },
-      });
-    expect(await tasks(toOmo)).toEqual([]);
+    const toOmo = await handleTasksRequest(...request(), {
+      omo: { sessionOf: () => omoNow ? { cwd: omoCwd, sessionId: "omo-session" } : null },
+      claudeAgents: { sessionOf: () => null, ensure: async () => undefined },
+      opencodeAgents: {
+        sessionOf: () => ({ path: s.path, session: s.parent, live: true }), ensure: () => false,
+        tasksOf: async () => { const read = await listOf(s.parent, true); omoNow = true; return read; },
+      },
+    });
+    expect(await tasks(toOmo)).toEqual([["st_1", "running"]]);
+    // a pane whose session moves on with every read is told nothing for sure, after three reads
+    let flips = 0;
+    const restless = await handleTasksRequest(...request(), {
+      omo: { sessionOf: () => null },
+      claudeAgents: { sessionOf: () => null, ensure: async () => undefined },
+      opencodeAgents: {
+        sessionOf: () => ({ path: s.path, session: flips === 0 ? s.parent : `ses_flip${flips}`, live: true }), ensure: () => false,
+        tasksOf: async () => { const read = await listOf(flips === 0 ? s.parent : `ses_flip${flips}`, true); flips++; return read; },
+      },
+    });
+    expect(await tasks(restless)).toEqual([]);
+    expect(flips).toBe(3);
   });
 });
