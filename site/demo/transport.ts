@@ -1043,7 +1043,9 @@ function usageReport(): UsageReport {
  * Fictional paired devices, and what that page does with them: rename, revoke one, revoke all,
  * and start a pairing that a fictional phone completes a moment later, which is what sends the
  * `device-paired` event every open window shows as a line (src/components/DevicePairedNotice.tsx).
- * `?demo_devices=` picks another state for the browser lane's captures: `empty` (nothing paired),
+ * All of it answers only with `?demo_devices=`: without it the demo has no device list (its
+ * /api/devices is a 404, which scripts/security-summary-demo-regression.ts relies on). `list` is the
+ * fictional devices below; another value picks a state for the browser lane's captures: `empty` (nothing paired),
  * `watch` (this browser is a device that only watches), `slow` (the list is held until the page calls
  * `herdrDemoReleaseDevices()`, so a capture of the loading state never races the answer) or `error`
  * (the registry cannot be written, so revoking fails). No real credential is involved anywhere.
@@ -1131,34 +1133,37 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     const lan = variant === "unknown" ? { lan_exposure: { host: "0.0.0.0" } } : {};
     return json({ ok: true, herdr: { version: "0.9.0", protocol: 22, terminal_attach: true }, auth, ...lan, ...facts, web_ui: { boot_id: orderOf(local.id).epoch, revision: null } }, 200, { "cache-control": "no-store" });
   }
-  if (path === "/api/devices") {
-    // the `slow` state: held until released, so the lane captures the page while its list loads
-    if (deviceListHeld) await deviceListHeld;
-    return json({ devices: demoDevices }, 200, { "cache-control": "no-store" });
-  }
-  if (path === "/api/devices/pair/start") {
-    if (demoAuth.role === "watch") return error("read_only", "this device can only watch", 403);
-    if (PAIRING_HELD) heldPairings.push(demoDevicePairs);
-    else setTimeout(demoDevicePairs, DEVICE_PAIRS_AFTER_MS);
-    return json({ code: "482913", expires_at: new Date(Date.now() + 10 * 60_000).toISOString() } satisfies PairingCode, 200, { "cache-control": "no-store" });
-  }
-  if (path === "/api/devices/revoke-all") {
-    if (demoAuth.role === "watch") return error("read_only", "this device can only watch", 403);
-    if (DEVICE_STATE === "error") return registryUnwritable();
-    const revoked = demoDevices.length;
-    demoDevices.length = 0;
-    return json({ revoked } satisfies DevicesRevokedAll, 200, { "cache-control": "no-store" });
-  }
-  const deviceId = /^\/api\/devices\/([0-9a-f]{16})$/.exec(path)?.[1];
-  if (deviceId !== undefined) {
-    if (demoAuth.role === "watch") return error("read_only", "this device can only watch", 403);
-    const index = demoDevices.findIndex((device) => device.id === deviceId);
-    if (index === -1) return error("not_found", "no such device", 404);
-    if (DEVICE_STATE === "error") return registryUnwritable();
-    if (method === "DELETE") { demoDevices.splice(index, 1); return new Response(null, { status: 204 }); }
-    const label = String((await bodyOf(init, input))["label"] ?? "").replace(/\s+/g, " ").trim().slice(0, 48) || "Device";
-    demoDevices[index] = { ...demoDevices[index]!, label };
-    return json(demoDevices[index]);
+  // without `?demo_devices=` the demo answers no device route: its /api/devices stays a 404, as before
+  if (DEVICE_STATE !== null) {
+    if (path === "/api/devices") {
+      // the `slow` state: held until released, so the lane captures the page while its list loads
+      if (deviceListHeld) await deviceListHeld;
+      return json({ devices: demoDevices }, 200, { "cache-control": "no-store" });
+    }
+    if (path === "/api/devices/pair/start") {
+      if (demoAuth.role === "watch") return error("read_only", "this device can only watch", 403);
+      if (PAIRING_HELD) heldPairings.push(demoDevicePairs);
+      else setTimeout(demoDevicePairs, DEVICE_PAIRS_AFTER_MS);
+      return json({ code: "482913", expires_at: new Date(Date.now() + 10 * 60_000).toISOString() } satisfies PairingCode, 200, { "cache-control": "no-store" });
+    }
+    if (path === "/api/devices/revoke-all") {
+      if (demoAuth.role === "watch") return error("read_only", "this device can only watch", 403);
+      if (DEVICE_STATE === "error") return registryUnwritable();
+      const revoked = demoDevices.length;
+      demoDevices.length = 0;
+      return json({ revoked } satisfies DevicesRevokedAll, 200, { "cache-control": "no-store" });
+    }
+    const deviceId = /^\/api\/devices\/([0-9a-f]{16})$/.exec(path)?.[1];
+    if (deviceId !== undefined) {
+      if (demoAuth.role === "watch") return error("read_only", "this device can only watch", 403);
+      const index = demoDevices.findIndex((device) => device.id === deviceId);
+      if (index === -1) return error("not_found", "no such device", 404);
+      if (DEVICE_STATE === "error") return registryUnwritable();
+      if (method === "DELETE") { demoDevices.splice(index, 1); return new Response(null, { status: 204 }); }
+      const label = String((await bodyOf(init, input))["label"] ?? "").replace(/\s+/g, " ").trim().slice(0, 48) || "Device";
+      demoDevices[index] = { ...demoDevices[index]!, label };
+      return json(demoDevices[index]);
+    }
   }
   if (path === "/api/machines") {
     const asked = query.getAll("verify_source_boot");

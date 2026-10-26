@@ -23,6 +23,8 @@ const app = mkdtempSync(join(tmpdir(), "herdr-device-security-demo-"));
 const evidence = process.env.UI_EVIDENCE_DIR || "";
 const NOTICE = '[data-testid="device-paired-notice"]';
 const PAIRS_WITHIN_MS = 10_000;
+/** how far under a whole pixel a measured box may fall from layout rounding alone (a fractional offset above the list) */
+const SUBPIXEL = 0.01;
 
 type Theme = "light" | "dark";
 type Language = "en" | "ko";
@@ -43,7 +45,9 @@ async function open(context: BrowserContext, port: number, search: string): Prom
   const page = await context.newPage();
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto(`http://127.0.0.1:${port}/herdr-web-ui/demo/app/?settings=devices${search}`);
+  // the demo answers its device routes only when asked (`demo_devices`); `list` is the fictional devices
+  const devices = search.includes("demo_devices=") ? "" : "&demo_devices=list";
+  await page.goto(`http://127.0.0.1:${port}/herdr-web-ui/demo/app/?settings=devices${devices}${search}`);
   await page.locator(".conn-live").waitFor();
   await page.locator(".settings-dialog").waitFor();
   return { page, errors };
@@ -326,7 +330,7 @@ try {
             assert.deepEqual(await overflow(page), [], `nothing reaches past the edge at ${width}`);
             if (phone) {
               const targets = await touchTargets(page, ".devices-panel button");
-              for (const target of targets) assert.ok(target.width >= 44 && target.height >= 44, `${target.label}: ${target.width}x${target.height} is a 44 px target`);
+              for (const target of targets) assert.ok(target.width >= 44 - SUBPIXEL && target.height >= 44 - SUBPIXEL, `${target.label}: ${target.width}x${target.height} is a 44 px target`);
             }
             if (!phone) {
               await rowButton.hover();
@@ -355,6 +359,8 @@ try {
               // Revoke all held down: the touch rule (styles.css, pointer: coarse) dims what is pressed. Headless
               // Chrome holds no :active for a synthetic touch, so the pointer is held under the same touch
               // emulation, and let go away from the button so nothing is clicked
+              // the scrolled-end frame may have taken the row out of view (Settings groups below Devices)
+              await reveal(row);
               const box = (await rowButton.boundingBox())!;
               const resting = evidence ? createHash("sha256").update(await page.screenshot()).digest("hex") : "";
               await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -642,7 +648,7 @@ try {
             assert.deepEqual(await overflow(page), [], "the notice fits");
             if (phone) {
               const targets = await touchTargets(page, `${NOTICE} button`);
-              for (const target of targets) assert.ok(target.width >= 44 && target.height >= 44, `${target.label}: ${target.width}x${target.height} is a 44 px target`);
+              for (const target of targets) assert.ok(target.width >= 44 - SUBPIXEL && target.height >= 44 - SUBPIXEL, `${target.label}: ${target.width}x${target.height} is a 44 px target`);
             }
             // its action: Phone & devices opens, and the line is read
             await press(notice.getByRole("button", { name: label("Phone & devices"), exact: true }));
