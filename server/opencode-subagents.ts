@@ -122,8 +122,8 @@ interface Scan {
   /** session_v2's columns, once read; a store with no child sessions has nothing to read */
   columns: Set<string> | null; after: number; paged: boolean;
   open: string[]; ended: { id: string; at: number }[];
-  /** phase 2: the ids to read again, how far, the ones read (a page read again after a failed try adds none twice) */
-  ids: string[] | null; reread: number; seen: Set<string>; promptAt: number | null;
+  /** phase 2: the ids to read again, and how far (a page is taken only once all of it is read: one that failed is read again whole) */
+  ids: string[] | null; reread: number; promptAt: number | null;
   running: number; turnRunning: number; going: KeptRun[]; stopped: { run: KeptRun; at: number; end: ReturnType<typeof runEnd> }[];
   state: OpencodeSubagentState | null; shown: { run: KeptRun; at: number | null; end: ReturnType<typeof runEnd> }[];
   work: Map<string, ReturnType<typeof childWork>>; worked: number;
@@ -136,7 +136,7 @@ const WORK_STEP = 50;
 export const RUNNING_LIMIT = 1000;
 
 function newScan(sessionId: string, now: number, live: boolean, serviceStart: number | null, detail: boolean): Scan {
-  return { sessionId, now, live, serviceStart, detail, columns: null, after: 0, paged: false, open: [], ended: [], ids: null, reread: 0, seen: new Set(), promptAt: null, running: 0, turnRunning: 0, going: [], stopped: [], state: null, shown: [], work: new Map(), worked: 0, finished: false };
+  return { sessionId, now, live, serviceStart, detail, columns: null, after: 0, paged: false, open: [], ended: [], ids: null, reread: 0, promptAt: null, running: 0, turnRunning: 0, going: [], stopped: [], state: null, shown: [], work: new Map(), worked: 0, finished: false };
 }
 
 /** One step of a scan. */
@@ -196,12 +196,10 @@ function rereadPage(db: Database, scan: Scan, columns: Set<string>): void {
       ${["title", "agent", "model"].map((name) => columns.has(name) ? `s.${name}` : `NULL AS ${name}`).join(", ")}
     FROM session_v2 AS s JOIN session_message AS m ON m.id = (${NEWEST}) WHERE s.id = ?`);
   // the whole page is read before any of it is taken: a page that fails part way is read again whole
-  const page = scan.ids.slice(scan.reread, scan.reread + SUBAGENT_PAGE).filter((id) => !scan.seen.has(id)).flatMap((id) => full.get(id) ?? []);
+  const page = scan.ids.slice(scan.reread, scan.reread + SUBAGENT_PAGE).flatMap((id) => full.get(id) ?? []);
   const lastAt = (run: ChildRun): number => stamp(run.completed) ?? stamp(run.created_at) ?? run.at;
   const orphan = (run: ChildRun): boolean => scan.serviceStart !== null && lastAt(run) < scan.serviceStart - START_SLACK_MS;
   for (const run of page) {
-    if (scan.seen.has(run.id)) continue;
-    scan.seen.add(run.id);
     const end = runEnd(run);
     if (end === null && scan.live && !orphan(run)) {
       scan.running++;
@@ -356,7 +354,6 @@ export class OpencodeSubagentStatus {
     return tracked && path !== null ? { path, session: tracked.session, live: tracked.live } : null;
   }
 
-  /** A pane's list, as the background tasks route answers it; null when the store cannot be read now. */
   /**
    * A pane's list, as the background tasks route answers it; null when the store cannot be read now. The read lets the
    * event loop go: a pane that comes to run another session (or stops running it) meanwhile is read again for that, so
@@ -367,8 +364,8 @@ export class OpencodeSubagentStatus {
       const known = this.sessionOf(paneId);
       if (known === null) return [];
       const state = await pagedState(known.path, known.session, known.live, this.now(), this.deps.serviceStart?.() ?? null);
-      const now = this.sessionOf(paneId);
-      if (now?.path === known.path && now.session === known.session && now.live === known.live) return state?.tasks ?? null;
+      const current = this.sessionOf(paneId);
+      if (current?.path === known.path && current.session === known.session && current.live === known.live) return state?.tasks ?? null;
     }
     return null;
   }

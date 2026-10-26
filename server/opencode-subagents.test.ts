@@ -442,5 +442,17 @@ describe("the OpenCode subagent tracker", () => {
     expect(await tasks(await ask(false, false))).toEqual([["ses_working", "lost"]]);
     // the pane runs Claude Code now: its list is Claude's
     expect(await tasks(await ask(false, true))).toEqual([]);
+    // it comes to run Claude Code while OpenCode's list is read: the answer is Claude's
+    let claudeNow = false;
+    const moving = await handleTasksRequest(
+      new Request("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), new URL("http://localhost/api/pane/omo-tasks?pane_id=w1:p1"), "/api/pane/omo-tasks", {
+        omo: { sessionOf: () => null },
+        claudeAgents: { sessionOf: () => claudeNow ? { path: join(root, "absent.jsonl"), live: true, startedAt: null } : null, ensure: async () => undefined },
+        opencodeAgents: {
+          sessionOf: () => ({ path: s.path, session: s.parent, live: !claudeNow }), ensure: () => false,
+          tasksOf: async () => { const read = (await pagedState(s.path, s.parent, true))?.tasks ?? null; claudeNow = true; return read; },
+        },
+      });
+    expect(await tasks(moving)).toEqual([]);
   });
 });
