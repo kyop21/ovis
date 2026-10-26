@@ -27,9 +27,11 @@ export interface SshClient { ssh: string; sftp: string; keygen: string }
  * otherwise takes Git for Windows' build (installing Ovis there requires Git): the OpenSSH that
  * ships with Windows, started by a server that has no console, never exits once a remote command
  * wrote anything, so every connection hung until its timeout (Win32-OpenSSH#1427, #1470).
+ * Git is looked for only where its installer puts it, never through PATH: the ssh runs with the
+ * account's keys, and a folder on PATH may be one anybody can write to.
  */
-export function sshClient({ env = process.env, platform = process.platform, exists = existsSync, which = (command: string) => Bun.which(command) }: {
-  env?: Record<string, string | undefined>; platform?: NodeJS.Platform; exists?: (path: string) => boolean; which?: (command: string) => string | null;
+export function sshClient({ env = process.env, platform = process.platform, exists = existsSync, which = (command: string) => Bun.which(command), registry = gitInstallPath }: {
+  env?: Record<string, string | undefined>; platform?: NodeJS.Platform; exists?: (path: string) => boolean; which?: (command: string) => string | null; registry?: () => string | null;
 } = {}): SshClient {
   const path = platform === "win32" ? win32 : posix;
   const plain: SshClient = { ssh: "ssh", sftp: "sftp", keygen: "ssh-keygen" };
@@ -46,23 +48,31 @@ export function sshClient({ env = process.env, platform = process.platform, exis
   // a bare name is looked up on PATH, so its sftp and ssh-keygen come from the same folder
   if (override) return beside(override.includes("/") || override.includes("\\") ? override : which(override) ?? override);
   if (platform !== "win32") return plain;
-  // only Git's own layouts: <Git>\cmd\git.exe, <Git>\bin\git.exe, <Git>\mingw64\bin\git.exe
+  // a machine-wide install (the registry and Program Files take an administrator to change),
+  // then one inside this account's own profile, which only the account itself can write
   const roots: string[] = [];
-  const git = which("git");
-  if (git) {
-    const dir = win32.dirname(git);
-    const parent = win32.dirname(dir);
-    if (/^mingw(32|64)$/i.test(win32.basename(parent)) && /^bin$/i.test(win32.basename(dir))) roots.push(win32.dirname(parent));
-    else if (/^(cmd|bin)$/i.test(win32.basename(dir))) roots.push(parent);
-  }
+  const installed = registry();
+  if (installed) roots.push(installed);
   for (const base of [env["ProgramFiles"], env["ProgramFiles(x86)"], env["LOCALAPPDATA"] && win32.join(env["LOCALAPPDATA"], "Programs")]) if (base) roots.push(win32.join(base, "Git"));
-  // Scoop puts a shim on PATH, not git.exe itself
-  if (env["USERPROFILE"]) roots.push(win32.join(env["SCOOP"] || win32.join(env["USERPROFILE"], "scoop"), "apps", "git", "current"));
+  if (env["USERPROFILE"]) roots.push(win32.join(env["USERPROFILE"], "scoop", "apps", "git", "current"));
   for (const root of roots) {
     const ssh = win32.join(root, "usr", "bin", "ssh.exe");
     if (exists(ssh)) return beside(ssh);
   }
   return plain;
+}
+
+let gitInstall: string | null | undefined;
+/** Git for Windows' machine-wide install folder, as its installer recorded it, read once. */
+function gitInstallPath(): string | null {
+  if (gitInstall !== undefined) return gitInstall;
+  gitInstall = null;
+  if (!WINDOWS) return gitInstall;
+  // reg.exe by its full path: a reg.exe earlier on PATH must not answer
+  const reg = join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "reg.exe");
+  const result = Bun.spawnSync([reg, "query", "HKLM\\SOFTWARE\\GitForWindows", "/v", "InstallPath"], { windowsHide: true, stdin: "ignore", stdout: "pipe", stderr: "ignore", timeout: 3000 });
+  gitInstall = /InstallPath\s+REG_SZ\s+(.+)/.exec(result.stdout?.toString() ?? "")?.[1]?.trim() || null;
+  return gitInstall;
 }
 
 /**
@@ -273,7 +283,13 @@ export class SshConnection {
       await this.learnHostKey(challenge);
       probe = await this.attempt([...this.direct("no"), "-T", this.target.destination, "exit"], until);
     }
-    if (probe.code !== 0) throw new Error(probe.stderr.trim() || "SSH connection failed");
+    if (probe.code !== 0) {
+      // a key Windows' own ssh-agent service holds is the likely thing missing
+      const agent = this.client.ssh !== "ssh" && /Permission denied/.test(probe.stderr)
+        ? "\nThe ssh this server runs on Windows (Git for Windows' unless OVIS_SSH names another) does not read Windows' ssh-agent service. Use a key file (~/.ssh/id_ed25519, or IdentityFile in ~/.ssh/config) or a password."
+        : "";
+      throw new Error((probe.stderr.trim() || "SSH connection failed") + agent);
+    }
     for (const [prompt, answer] of this.typed) this.answers.set(prompt, answer);
     this.typed.clear();
     const keepalive = this.master = Bun.spawn([...this.direct(), "-N", "-T", this.target.destination], { stdin: "ignore", stdout: "ignore", stderr: "ignore", env: this.askEnv() });

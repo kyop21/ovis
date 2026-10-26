@@ -123,6 +123,16 @@ describe.skipIf(process.platform === "win32")("SSH without connection sharing", 
     expect(calls().some((line) => line.startsWith(`sftp -S ${join(root, "bin", "ssh")} `))).toBe(true);
   });
 
+  it("says Windows' agent service is not read when the ssh it runs is refused", async () => {
+    const { ssh } = fixture({ FAKE_PASSPHRASE: "secret" }, { onPath: false });
+    await expect(ssh.start()).rejects.toThrow("does not read Windows' ssh-agent service");
+  });
+
+  it("adds nothing to a refusal when the plain ssh on PATH runs", async () => {
+    const { ssh } = fixture({ FAKE_PASSPHRASE: "secret" });
+    await expect(ssh.start()).rejects.toThrow(/^pc@pc\.example: Permission denied \(publickey\)\.$/);
+  });
+
   it("asks for a passphrase once and answers it to the commands after connecting", async () => {
     const { ssh, prompts, calls, ask } = fixture({ FAKE_PASSPHRASE: "secret" });
     await ssh.start(ask("secret"));
@@ -223,49 +233,51 @@ describe("which OpenSSH runs", () => {
   const gitClient = { ssh: String.raw`${git}\ssh.exe`, sftp: String.raw`${git}\sftp.exe`, keygen: String.raw`${git}\ssh-keygen.exe` };
   const only = (...paths: string[]) => (path: string) => paths.includes(path);
   const plain = { ssh: "ssh", sftp: "sftp", keygen: "ssh-keygen" };
+  const programFiles = { ProgramFiles: String.raw`C:\Program Files` };
+  const noRegistry = () => null;
 
   it("is Git for Windows' on Windows, whose ssh exits after a command that printed something", () => {
-    const which = () => String.raw`C:\Program Files\Git\cmd\git.exe`;
-    expect(sshClient({ platform: "win32", env: {}, which, exists: only(...Object.values(gitClient)) })).toEqual(gitClient);
+    expect(sshClient({ platform: "win32", env: programFiles, which: () => null, registry: noRegistry, exists: only(...Object.values(gitClient)) })).toEqual(gitClient);
   });
 
-  it("finds Git in its install folder when git is not on PATH", () => {
-    const env = { ProgramFiles: String.raw`C:\Program Files` };
-    expect(sshClient({ platform: "win32", env, which: () => null, exists: only(...Object.values(gitClient)) })).toEqual(gitClient);
+  it("finds Git where its installer recorded it", () => {
+    const dir = String.raw`D:\Tools\Git\usr\bin`;
+    const client = { ssh: String.raw`${dir}\ssh.exe`, sftp: String.raw`${dir}\sftp.exe`, keygen: String.raw`${dir}\ssh-keygen.exe` };
+    expect(sshClient({ platform: "win32", env: programFiles, which: () => null, registry: () => String.raw`D:\Tools\Git`, exists: only(...Object.values(client), ...Object.values(gitClient)) })).toEqual(client);
+  });
+
+  it("never takes an ssh from a Git-shaped folder on PATH, which anybody may be able to write", () => {
+    const planted = String.raw`C:\Users\Public\planted`;
+    const which = () => String.raw`${planted}\cmd\git.exe`;
+    const plantedSsh = String.raw`${planted}\usr\bin\ssh.exe`;
+    expect(sshClient({ platform: "win32", env: programFiles, which, registry: noRegistry, exists: only(plantedSsh, ...Object.values(gitClient)) })).toEqual(gitClient);
+    expect(sshClient({ platform: "win32", env: programFiles, which, registry: noRegistry, exists: only(plantedSsh) })).toEqual(plain);
   });
 
   it("is the one OVIS_SSH names, with the sftp and ssh-keygen beside it where they exist", () => {
-    const env = { OVIS_SSH: String.raw`D:\OpenSSH\ssh.exe` };
+    const env = { ...programFiles, OVIS_SSH: String.raw`D:\OpenSSH\ssh.exe` };
     const exists = only(...Object.values(gitClient), String.raw`D:\OpenSSH\sftp.exe`);
-    expect(sshClient({ platform: "win32", env, which: () => String.raw`C:\Program Files\Git\cmd\git.exe`, exists }))
+    expect(sshClient({ platform: "win32", env, which: () => null, registry: noRegistry, exists }))
       .toEqual({ ssh: String.raw`D:\OpenSSH\ssh.exe`, sftp: String.raw`D:\OpenSSH\sftp.exe`, keygen: "ssh-keygen" });
-  });
-
-  it("finds Git from its mingw64 git, and never looks outside Git's own folder", () => {
-    const exists = only(...Object.values(gitClient));
-    expect(sshClient({ platform: "win32", env: {}, which: () => String.raw`C:\Program Files\Git\mingw64\bin\git.exe`, exists })).toEqual(gitClient);
-    const outside = only(String.raw`C:\Program Files\usr\bin\ssh.exe`, String.raw`C:\Users\pc\usr\bin\ssh.exe`);
-    expect(sshClient({ platform: "win32", env: {}, which: () => String.raw`C:\Program Files\Git\cmd\git.exe`, exists: outside })).toEqual(plain);
-    expect(sshClient({ platform: "win32", env: {}, which: () => String.raw`C:\Users\pc\scoop\shims\git.exe`, exists: outside })).toEqual(plain);
   });
 
   it("takes OVIS_SSH in quotes, or as a name on PATH, with that folder's sftp and ssh-keygen", () => {
     const dir = String.raw`D:\OpenSSH`;
     const client = { ssh: String.raw`${dir}\ssh.exe`, sftp: String.raw`${dir}\sftp.exe`, keygen: String.raw`${dir}\ssh-keygen.exe` };
     const exists = only(...Object.values(client));
-    expect(sshClient({ platform: "win32", env: { OVIS_SSH: `"${client.ssh}"` }, which: () => null, exists })).toEqual(client);
-    expect(sshClient({ platform: "win32", env: { OVIS_SSH: "ssh.exe" }, which: (name) => name === "ssh.exe" ? client.ssh : null, exists })).toEqual(client);
+    expect(sshClient({ platform: "win32", env: { OVIS_SSH: `"${client.ssh}"` }, which: () => null, registry: noRegistry, exists })).toEqual(client);
+    expect(sshClient({ platform: "win32", env: { OVIS_SSH: "ssh.exe" }, which: (name) => name === "ssh.exe" ? client.ssh : null, registry: noRegistry, exists })).toEqual(client);
   });
 
-  it("finds a Scoop Git, whose git on PATH is a shim", () => {
+  it("finds a Scoop Git in the account's own profile", () => {
     const env = { USERPROFILE: String.raw`C:\Users\pc` };
     const scoop = String.raw`C:\Users\pc\scoop\apps\git\current\usr\bin`;
     const client = { ssh: String.raw`${scoop}\ssh.exe`, sftp: String.raw`${scoop}\sftp.exe`, keygen: String.raw`${scoop}\ssh-keygen.exe` };
-    expect(sshClient({ platform: "win32", env, which: () => String.raw`C:\Users\pc\scoop\shims\git.exe`, exists: only(...Object.values(client)) })).toEqual(client);
+    expect(sshClient({ platform: "win32", env, which: () => null, registry: noRegistry, exists: only(...Object.values(client)) })).toEqual(client);
   });
 
   it("stays the one on PATH without Git, and on other systems", () => {
-    expect(sshClient({ platform: "win32", env: {}, which: () => null, exists: () => false })).toEqual(plain);
-    expect(sshClient({ platform: "linux", env: {}, which: () => "/usr/bin/git", exists: () => true })).toEqual(plain);
+    expect(sshClient({ platform: "win32", env: programFiles, which: () => null, registry: noRegistry, exists: () => false })).toEqual(plain);
+    expect(sshClient({ platform: "linux", env: {}, which: () => "/usr/bin/git", registry: () => "/opt/git", exists: () => true })).toEqual(plain);
   });
 });
