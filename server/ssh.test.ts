@@ -241,6 +241,22 @@ describe("which OpenSSH runs", () => {
       .toEqual({ ssh: String.raw`D:\OpenSSH\ssh.exe`, sftp: String.raw`D:\OpenSSH\sftp.exe`, keygen: "ssh-keygen" });
   });
 
+  it("finds Git from its mingw64 git, and never looks outside Git's own folder", () => {
+    const exists = only(...Object.values(gitClient));
+    expect(sshClient({ platform: "win32", env: {}, which: () => String.raw`C:\Program Files\Git\mingw64\bin\git.exe`, exists })).toEqual(gitClient);
+    const outside = only(String.raw`C:\Program Files\usr\bin\ssh.exe`, String.raw`C:\Users\pc\usr\bin\ssh.exe`);
+    expect(sshClient({ platform: "win32", env: {}, which: () => String.raw`C:\Program Files\Git\cmd\git.exe`, exists: outside })).toEqual(plain);
+    expect(sshClient({ platform: "win32", env: {}, which: () => String.raw`C:\Users\pc\scoop\shims\git.exe`, exists: outside })).toEqual(plain);
+  });
+
+  it("takes OVIS_SSH in quotes, or as a name on PATH, with that folder's sftp and ssh-keygen", () => {
+    const dir = String.raw`D:\OpenSSH`;
+    const client = { ssh: String.raw`${dir}\ssh.exe`, sftp: String.raw`${dir}\sftp.exe`, keygen: String.raw`${dir}\ssh-keygen.exe` };
+    const exists = only(...Object.values(client));
+    expect(sshClient({ platform: "win32", env: { OVIS_SSH: `"${client.ssh}"` }, which: () => null, exists })).toEqual(client);
+    expect(sshClient({ platform: "win32", env: { OVIS_SSH: "ssh.exe" }, which: (name) => name === "ssh.exe" ? client.ssh : null, exists })).toEqual(client);
+  });
+
   it("finds a Scoop Git, whose git on PATH is a shim", () => {
     const env = { USERPROFILE: String.raw`C:\Users\pc` };
     const scoop = String.raw`C:\Users\pc\scoop\apps\git\current\usr\bin`;

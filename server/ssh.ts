@@ -34,19 +34,27 @@ export function sshClient({ env = process.env, platform = process.platform, exis
   const path = platform === "win32" ? win32 : posix;
   const plain: SshClient = { ssh: "ssh", sftp: "sftp", keygen: "ssh-keygen" };
   const beside = (ssh: string): SshClient => {
+    const extension = path.extname(ssh) || (platform === "win32" ? ".exe" : "");
     const sibling = (name: string, fallback: string) => {
-      const file = path.join(path.dirname(ssh), name + path.extname(ssh));
+      const file = path.join(path.dirname(ssh), name + extension);
       return path.dirname(ssh) !== "." && exists(file) ? file : fallback;
     };
     return { ssh, sftp: sibling("sftp", plain.sftp), keygen: sibling("ssh-keygen", plain.keygen) };
   };
-  const override = env["OVIS_SSH"]?.trim();
-  if (override) return beside(override);
+  // a value pasted with its quotes; it is a path, never evaluated by a shell
+  const override = env["OVIS_SSH"]?.trim().replace(/^"(.*)"$/, "$1");
+  // a bare name is looked up on PATH, so its sftp and ssh-keygen come from the same folder
+  if (override) return beside(override.includes("/") || override.includes("\\") ? override : which(override) ?? override);
   if (platform !== "win32") return plain;
-  // git.exe sits in <Git>\cmd, <Git>\bin or <Git>\mingw64\bin; its OpenSSH in <Git>\usr\bin
+  // only Git's own layouts: <Git>\cmd\git.exe, <Git>\bin\git.exe, <Git>\mingw64\bin\git.exe
   const roots: string[] = [];
   const git = which("git");
-  for (let dir = git ? win32.dirname(git) : "", up = 0; dir && up < 3; dir = win32.dirname(dir), up++) roots.push(dir);
+  if (git) {
+    const dir = win32.dirname(git);
+    const parent = win32.dirname(dir);
+    if (/^mingw(32|64)$/i.test(win32.basename(parent)) && /^bin$/i.test(win32.basename(dir))) roots.push(win32.dirname(parent));
+    else if (/^(cmd|bin)$/i.test(win32.basename(dir))) roots.push(parent);
+  }
   for (const base of [env["ProgramFiles"], env["ProgramFiles(x86)"], env["LOCALAPPDATA"] && win32.join(env["LOCALAPPDATA"], "Programs")]) if (base) roots.push(win32.join(base, "Git"));
   // Scoop puts a shim on PATH, not git.exe itself
   if (env["USERPROFILE"]) roots.push(win32.join(env["SCOOP"] || win32.join(env["USERPROFILE"], "scoop"), "apps", "git", "current"));
