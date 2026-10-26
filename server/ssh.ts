@@ -20,7 +20,11 @@ const WINDOWS = process.platform === "win32";
 function sshPath(path: string): string { return WINDOWS ? path.replaceAll("\\", "/") : path; }
 
 /** The OpenSSH programs a connection runs, all from one install. */
-export interface SshClient { ssh: string; sftp: string; keygen: string }
+export interface SshClient {
+  ssh: string; sftp: string; keygen: string;
+  /** Git for Windows' build, found where its installer put it, which does not read Windows' ssh-agent service */
+  git?: true;
+}
 
 /**
  * Which OpenSSH runs. `OVIS_SSH` names an ssh, with the sftp and ssh-keygen beside it. Windows
@@ -57,9 +61,20 @@ export function sshClient({ env = process.env, platform = process.platform, exis
   if (env["USERPROFILE"]) roots.push(win32.join(env["USERPROFILE"], "scoop", "apps", "git", "current"));
   for (const root of roots) {
     const ssh = win32.join(root, "usr", "bin", "ssh.exe");
-    if (exists(ssh)) return beside(ssh);
+    if (exists(ssh)) return { ...beside(ssh), git: true };
   }
   return plain;
+}
+
+/**
+ * What a refused connection adds to ssh's own words. Git for Windows' ssh does not read Windows'
+ * ssh-agent service, so a key only that service holds is the likely thing missing. Any other
+ * ssh, Windows' own included (which reads that service), gets nothing added.
+ */
+export function refusalHint(client: SshClient, stderr: string): string {
+  return client.git && /Permission denied/.test(stderr)
+    ? "\nGit for Windows' ssh, which this server runs on Windows, does not read Windows' ssh-agent service. Use a key file (~/.ssh/id_ed25519, or IdentityFile in ~/.ssh/config) or a password."
+    : "";
 }
 
 let gitInstall: string | null | undefined;
@@ -284,11 +299,7 @@ export class SshConnection {
       probe = await this.attempt([...this.direct("no"), "-T", this.target.destination, "exit"], until);
     }
     if (probe.code !== 0) {
-      // a key Windows' own ssh-agent service holds is the likely thing missing
-      const agent = this.client.ssh !== "ssh" && /Permission denied/.test(probe.stderr)
-        ? "\nThe ssh this server runs on Windows (Git for Windows' unless OVIS_SSH names another) does not read Windows' ssh-agent service. Use a key file (~/.ssh/id_ed25519, or IdentityFile in ~/.ssh/config) or a password."
-        : "";
-      throw new Error((probe.stderr.trim() || "SSH connection failed") + agent);
+      throw new Error((probe.stderr.trim() || "SSH connection failed") + refusalHint(this.client, probe.stderr));
     }
     for (const [prompt, answer] of this.typed) this.answers.set(prompt, answer);
     this.typed.clear();
